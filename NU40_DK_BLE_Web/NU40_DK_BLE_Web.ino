@@ -49,7 +49,10 @@ void scan_callback(ble_gap_evt_adv_report_t* report) {
   uint8_t name[32] = {0};
   uint8_t len = Bluefruit.Scanner.parseReportByType(
     report, BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, name, sizeof(name) - 1);
-  if (len && !strcmp((char*) name, DEVICE_NAME) && report->rssi >= MIN_RSSI) {
+  if (len &&
+    (strcmp((char*)name, "PIXEL_FRIEND") == 0 ||
+     strcmp((char*)name, "PIXEL") == 0) &&
+    report->rssi >= MIN_RSSI) {
     lastFriendSeen = millis();
     seenFriend = true;
   }
