@@ -59,7 +59,7 @@ async function connectNU40() {
     updateDeviceUI();
     // Must be called from the user's button click.
     const device = await navigator.bluetooth.requestDevice({
-      filters: [{ name: 'PIXEL_FRIEND' }],
+      filters: [{ namePrefix: 'PIXEL_FRIEND' }],
       optionalServices: [BLE_UART_SERVICE]
     });
     deviceLink.device = device;
