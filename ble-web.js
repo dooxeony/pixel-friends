@@ -5,6 +5,25 @@ const BLE_UART_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 const BLE_UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 
 const deviceLink = { device: null, tx: null, rx: null, status: '연결되지 않음', lastMessage: '' };
+let displaySyncTimer = null;
+
+// The preset selected during registration is saved in littleMeetProfile.
+// A browser supplies local time; the board has no real-time clock.
+async function syncBoardDisplay() {
+  if (!deviceLink.device?.gatt?.connected || !deviceLink.rx) return;
+  const profile = JSON.parse(localStorage.getItem('littleMeetProfile') || 'null');
+  if (!profile || profile.avatar?.type !== 'preset') {
+    deviceLink.lastMessage = '기본 캐릭터 5종만 보드에 표시할 수 있어요.';
+    updateDeviceUI();
+    return;
+  }
+  const index = Number(profile.avatar.index);
+  if (!Number.isInteger(index) || index < 0 || index > 4) return;
+  const d = new Date();
+  const hhmm = [d.getHours(), d.getMinutes()].map(n => String(n).padStart(2, '0')).join(':');
+  // Single short newline-terminated command avoids BLE UART packet fragmentation.
+  await deviceLink.rx.writeValue(new TextEncoder().encode(`DISPLAY:${index}:${hhmm}\n`));
+}
 
 function isBluetoothSupported() {
   return !!navigator.bluetooth && window.isSecureContext;
@@ -59,11 +78,13 @@ async function connectNU40() {
     updateDeviceUI();
     // Must be called from the user's button click.
     const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
+      acceptAllDevices: true, // Keep the all-device chooser the user already tested.
       optionalServices: [BLE_UART_SERVICE]
     });
     deviceLink.device = device;
     device.addEventListener('gattserverdisconnected', () => {
+      clearInterval(displaySyncTimer);
+      displaySyncTimer = null;
       deviceLink.status = '연결이 끊어졌어요.';
       deviceLink.tx = null;
       deviceLink.rx = null;
@@ -85,6 +106,12 @@ async function connectNU40() {
     deviceLink.lastMessage = '실제 보드가 연결됐어요. 친구 기록 저장은 다음 단계에서 추가합니다.';
     updateDeviceUI();
     await deviceLink.rx.writeValue(new TextEncoder().encode('HELLO\n'));
+    await syncBoardDisplay();
+    clearInterval(displaySyncTimer);
+    displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
+      deviceLink.lastMessage = `화면 전송 실패: ${error.message}`;
+      updateDeviceUI();
+    }), 15000);
   } catch (error) {
     deviceLink.status = '연결 실패 또는 취소됨';
     deviceLink.lastMessage = error?.message || String(error);
