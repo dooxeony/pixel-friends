@@ -14,13 +14,33 @@
 #define LED_R 14
 #define LED_G 15
 #define LED_B 16
+#define BUTTON_PIN 24  // P0.24? Arduino number 24 = P0.24; verify your wire
+
+// Set this to 1 on your board, 2 on your friend's board.
+#define MY_BOARD_ID 1
 
 Adafruit_GC9A01A tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, TFT_RST);
 BLEUart bleuart; // Nordic UART Service: readable from the web using Web Bluetooth
-const char DEVICE_NAME[] = "PIXEL_FRIEND";
+const char* DEVICE_NAME = MY_BOARD_ID == 1 ? "PIXEL_FRIEND_01" : "PIXEL_FRIEND_02";
 const int MIN_RSSI = -70;
 volatile uint32_t lastFriendSeen = 0;
 volatile bool seenFriend = false;
+volatile uint8_t peerId = 0;
+volatile uint8_t peerAvatar = 255;
+volatile uint8_t peerSignal = 0;
+volatile uint8_t peerTarget = 0;
+// 0 = nearby, 1 = request, 2 = accepted, 3 = rejected
+uint8_t mySignal = 0;
+uint8_t myTarget = 0;
+uint32_t signalUntil = 0;
+uint32_t lastButtonEdge = 0;
+uint32_t lastButtonRelease = 0;
+uint8_t clickCount = 0;
+bool buttonWasDown = false;
+bool incomingRequest = false;
+bool awaitingAnswer = false;
+bool friendsAdded = false;
+int displayedState = -1;
 bool visible = false;
 bool greenOn = false;
 uint32_t lastLedChange = 0;
@@ -121,6 +141,43 @@ void showMyDisplay() {
   }
   showClock();
 }
+
+void refreshAdvert() {
+  // Advertise a tiny peer-to-peer message without establishing a second BLE link.
+  // Prototype manufacturer payload: marker, board id, avatar, signal, target.
+  uint8_t data[] = {0xFF, 0xFF, 'P', 'F', MY_BOARD_ID,
+                    currentAvatar >= 0 ? (uint8_t) currentAvatar : (uint8_t)255,
+                    mySignal, myTarget};
+  Bluefruit.Advertising.stop();
+  Bluefruit.Advertising.clearData();
+  Bluefruit.ScanResponse.clearData();
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addService(bleuart);
+  Bluefruit.Advertising.addManufacturerData(data, sizeof(data));
+  Bluefruit.ScanResponse.addName();
+  Bluefruit.Advertising.start(0);
+}
+
+void publishSignal(uint8_t signal, uint8_t target) {
+  mySignal = signal;
+  myTarget = target;
+  signalUntil = millis() + 6000;
+  refreshAdvert();
+}
+
+void showFriendScreen(const char* title, uint8_t avatar) {
+  tft.fillScreen(rgb(SCREEN_BG));
+  if (avatar <= 4) {
+    drawAvatar(avatar);
+    maskAvatarIntoCircle();
+  } else {
+    tft.fillCircle(120, 95, 54, rgb(FRAME_COLOR));
+  }
+  tft.setTextSize(2);
+  tft.setTextColor(rgb(CLOCK_TEXT), rgb(SCREEN_BG));
+  tft.setCursor(20, 194);
+  tft.print(title);
+}
 void handleCommand(const char* line) {
   if (strcmp(line, "HELLO") == 0) {
     bleuart.println("NU40-DK READY");
@@ -135,8 +192,11 @@ void handleCommand(const char* line) {
       bool timeChanged = strcmp(currentTime, nextTime) != 0;
       currentAvatar = i;
       strcpy(currentTime, nextTime);
-      if (avatarChanged) showMyDisplay();
-      else if (timeChanged) showClock();
+      if (avatarChanged) refreshAdvert();
+      if (displayedState == 0 || displayedState == -1) {
+        if (avatarChanged) showMyDisplay();
+        else if (timeChanged) showClock();
+      }
       bleuart.println("DISPLAY OK");
     }
   }
@@ -165,15 +225,17 @@ void showFound() {
 }
 
 void scan_callback(ble_gap_evt_adv_report_t* report) {
-  uint8_t name[32] = {0};
+  uint8_t data[24] = {};
   uint8_t len = Bluefruit.Scanner.parseReportByType(
-    report, BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME, name, sizeof(name) - 1);
-  if (len &&
-    (strcmp((char*)name, "PIXEL_FRIEND") == 0 ||
-     strcmp((char*)name, "PIXEL") == 0) &&
-    report->rssi >= MIN_RSSI) {
+    report, BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, data, sizeof(data));
+  if (len >= 8 && data[2] == 'P' && data[3] == 'F' &&
+      data[4] != MY_BOARD_ID && data[4] != 0 && report->rssi >= MIN_RSSI) {
     lastFriendSeen = millis();
     seenFriend = true;
+    peerId = data[4];
+    peerAvatar = data[5];
+    peerSignal = data[6];
+    peerTarget = data[7];
   }
   Bluefruit.Scanner.resume();
 }
@@ -183,6 +245,7 @@ void setup() {
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
   pinMode(LED_B, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(LED_R, LOW);
   digitalWrite(LED_G, LOW);
   digitalWrite(LED_B, LOW);
@@ -190,26 +253,77 @@ void setup() {
   tft.begin();
   tft.fillScreen(GC9A01A_BLACK); // Shows the selected avatar after Web BLE sync.
 
-  // First milestone: only the browser-to-board BLE link is active.
-  // Board-to-board scanning can be re-enabled after avatar/time works.
-  Bluefruit.begin(1, 0);
+  Bluefruit.begin(1, 1);
   Bluefruit.setName(DEVICE_NAME);
   Bluefruit.setTxPower(0);
   bleuart.begin();
 
-  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-  Bluefruit.Advertising.addService(bleuart);
-  Bluefruit.ScanResponse.addName();
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(160, 160);
-  Bluefruit.Advertising.start(0);
+  refreshAdvert();
+  Bluefruit.Scanner.setRxCallback(scan_callback);
+  Bluefruit.Scanner.useActiveScan(false);
+  Bluefruit.Scanner.setInterval(160, 80);
+  Bluefruit.Scanner.start(0);
 }
 
 void loop() {
   uint32_t now = millis();
   bool found = seenFriend && (now - lastFriendSeen < 4000);
 
-  // Friend detection only drives the LED; it must not replace the avatar/clock.
+  if (mySignal && (int32_t)(now - signalUntil) >= 0) {
+    mySignal = 0;
+    myTarget = 0;
+    refreshAdvert();
+  }
+
+  // One physical button: single click=request, double=accept, triple=reject.
+  bool buttonDown = digitalRead(BUTTON_PIN) == LOW;
+  if (buttonDown != buttonWasDown && now - lastButtonEdge > 35) {
+    lastButtonEdge = now;
+    buttonWasDown = buttonDown;
+    if (!buttonDown) {
+      clickCount++;
+      lastButtonRelease = now;
+    }
+  }
+  if (clickCount && now - lastButtonRelease > 450) {
+    uint8_t clicks = clickCount;
+    clickCount = 0;
+    if (clicks == 1 && found && !incomingRequest) {
+      awaitingAnswer = true;
+      publishSignal(1, peerId);
+    } else if (clicks == 2 && incomingRequest) {
+      friendsAdded = true;
+      incomingRequest = false;
+      publishSignal(2, peerId);
+    } else if (clicks >= 3 && incomingRequest) {
+      incomingRequest = false;
+      publishSignal(3, peerId);
+    }
+  }
+
+  if (found && peerTarget == MY_BOARD_ID) {
+    if (peerSignal == 1 && !friendsAdded) incomingRequest = true;
+    if (peerSignal == 2 && awaitingAnswer) {
+      awaitingAnswer = false;
+      friendsAdded = true;
+    }
+    if (peerSignal == 3 && awaitingAnswer) awaitingAnswer = false;
+  }
+
+  int screenState = friendsAdded ? 4 : incomingRequest ? 3 :
+                    awaitingAnswer ? 2 : found ? 1 : 0;
+  if (screenState != displayedState) {
+    displayedState = screenState;
+    if (screenState == 4) showFriendScreen("FRIENDS!", peerAvatar);
+    else if (screenState == 3) showFriendScreen("2:YES 3:NO", peerAvatar);
+    else if (screenState == 2) showFriendScreen("WAITING...", peerAvatar);
+    else if (screenState == 1) showFriendScreen("1:LIKE", peerAvatar);
+    else showMyDisplay();
+  }
+
+  // A nearby friend flashes the green LED.
   visible = found;
 
   if (found && now - lastLedChange >= 300) {
