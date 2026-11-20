@@ -4,6 +4,19 @@ const names=['몽글 토끼','말랑 곰','복숭아 냥이','초록 개구리',
 function drawSprite(c,i,size=32){const ctx=c.getContext('2d');c.width=c.height=size;ctx.imageSmoothingEnabled=false;const unit=size/32;const block=(x,y,w,h,col)=>{ctx.fillStyle=col;ctx.fillRect(Math.round(x*unit),Math.round(y*unit),Math.ceil(w*unit),Math.ceil(h*unit))};let [base,pink,ink]=palettes[i];block(0,0,32,32,['#cceef4','#f9e8d9','#fcecf2','#d8f0e5','#f9eac9'][i]);if(i===0){block(8,2,5,12,ink);block(19,2,5,12,ink);block(9,3,3,10,base);block(20,3,3,10,base);block(10,5,1,6,pink);block(21,5,1,6,pink)}else if(i===1){block(5,7,8,9,ink);block(19,7,8,9,ink);block(7,9,5,6,base);block(20,9,5,6,base)}else if(i===2){block(5,4,10,13,ink);block(18,4,9,13,ink);block(7,6,7,9,base);block(20,6,5,9,base)}else if(i===3){block(6,6,8,8,ink);block(19,6,8,8,ink);block(8,7,5,5,'#fff');block(21,7,5,5,'#fff')}else{block(13,2,6,8,pink);block(17,4,6,6,pink)}
 block(6,11,20,16,ink);block(4,15,24,11,ink);block(7,12,18,14,base);block(5,16,22,9,base);block(8,26,6,3,ink);block(18,26,6,3,ink);block(9,26,4,2,base);block(19,26,4,2,base);block(9,19,4,2,pink);block(20,19,4,2,pink);block(11,17,3,2,ink);block(19,17,3,2,ink);block(15,21,3,2,ink);if(i===4){block(15,20,4,3,'#f2a05c')}if(i===3){block(9,12,4,2,ink);block(20,12,4,2,ink)} }
 function renderAvatar(c,avatar){if(avatar.type==='custom'){const img=new Image();img.onload=()=>{c.width=c.height=64;const ctx=c.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(img,0,0,64,64)};img.src=avatar.data}else drawSprite(c,avatar.index)}
+// Character art v2: preserves the original character indices and profile storage.
+const newSpriteFiles=['rabbit','bear','cat','frog','chick'];
+const newSpriteCache=newSpriteFiles.map(name=>{const img=new Image();img.src='./assets/characters/'+name+'.png';return img});
+drawSprite=function(canvas,index,size=128){
+  if(!canvas)return;
+  const image=newSpriteCache[index];
+  if(!image)return;
+  const context=canvas.getContext('2d');
+  canvas.width=canvas.height=size;
+  context.imageSmoothingEnabled=false;
+  const paint=()=>{if(!canvas.isConnected)return;context.clearRect(0,0,size,size);context.drawImage(image,0,0,size,size)};
+  if(image.complete&&image.naturalWidth)paint();else image.addEventListener('load',paint,{once:true});
+};
 function avatarHTML(avatar,cls=''){return `<canvas class="${cls}" data-avatar='${JSON.stringify(avatar)}'></canvas>`}
 function hydrate(){document.querySelectorAll('canvas[data-avatar]').forEach(c=>renderAvatar(c,JSON.parse(c.dataset.avatar)))}
 function progress(n){return `<div class="progress">${[0,1,2].map(i=>`<span class="${i<=n?'on':''}"></span>`).join('')}</div>`}

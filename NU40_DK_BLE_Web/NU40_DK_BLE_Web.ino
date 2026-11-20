@@ -2,6 +2,8 @@
 #include <Adafruit_GFX.h>
 #include "Adafruit_GC9A01A.h"
 #include <string.h>
+#include <math.h>
+#include "characters_new.h"
 
 // Existing wiring, unchanged.
 #define TFT_SCK  43
@@ -26,6 +28,10 @@ int currentAvatar = -1;
 char currentTime[6] = "--:--";
 char command[48] = {0};
 size_t commandLength = 0;
+const uint32_t SCREEN_BG = 0xfff1f5; // soft pastel pink
+const uint32_t FRAME_COLOR = 0xe997b3;
+const uint32_t CLOCK_BG = 0xffffff;
+const uint32_t CLOCK_TEXT = 0x503f48;
 
 // The same 32x32 block-art rules and palettes as script.js.
 uint16_t rgb(uint32_t hex) {
@@ -36,6 +42,15 @@ void block(int x, int y, int w, int h, uint16_t color) {
   tft.fillRect(40 + x * 5, 17 + y * 5, w * 5, h * 5, color);
 }
 void drawAvatar(int i) {
+  // New head-only pixel sprites. Keep the same 0..4 mapping used by the web.
+  const uint16_t* art = newCharacterSprites[i];
+  for (int y = 0; y < 80; ++y) {
+    for (int x = 0; x < 80; ++x) {
+      const uint16_t color = pgm_read_word(&art[y * 80 + x]);
+      tft.fillRect(40 + x * 2, 17 + y * 2, 2, 2, color);
+    }
+  }
+  return;
   const uint32_t baseHex[] = {0xfff9dd, 0xdcb58b, 0xf9d8c9, 0xa3d9a5, 0xffe58e};
   const uint32_t pinkHex[] = {0xf6bbcb, 0xf6d5b0, 0xef9cb1, 0xd5efae, 0xffb787};
   const uint32_t inkHex[]  = {0x503f48, 0x58443a, 0x654a52, 0x365d4e, 0x69533b};
@@ -68,16 +83,42 @@ void drawAvatar(int i) {
   if (i == 4) block(15,20,4,3,rgb(0xf2a05c));
   if (i == 3) { block(9,12,4,2,ink); block(20,12,4,2,ink); }
 }
+void maskAvatarIntoCircle() {
+  // Hide square sprite corners using the surrounding screen color.
+  // The 160x160 sprite is centered inside a 76-pixel-radius window.
+  const int cx = 120, cy = 97, radius = 76;
+  const uint16_t bg = rgb(SCREEN_BG);
+  for (int x = 40; x < 200; ++x) {
+    const int dx = x - cx;
+    int span = abs(dx) <= radius
+      ? (int)sqrtf((float)(radius * radius - dx * dx)) : -1;
+    const int top = cy - span;
+    const int bottom = cy + span;
+    if (span < 0) {
+      tft.drawFastVLine(x, 17, 160, bg);
+    } else {
+      if (top > 17) tft.drawFastVLine(x, 17, top - 17, bg);
+      if (bottom < 176) tft.drawFastVLine(x, bottom + 1, 176 - bottom, bg);
+    }
+  }
+  tft.drawCircle(cx, cy, 78, rgb(FRAME_COLOR));
+  tft.drawCircle(cx, cy, 79, rgb(FRAME_COLOR));
+}
 void showClock() {
-  tft.fillRect(45, 190, 155, 35, GC9A01A_BLACK);
-  tft.setTextSize(4);
-  tft.setTextColor(GC9A01A_WHITE);
-  tft.setCursor(60, 191);
+  // Completely redraw the rounded time badge when minutes change.
+  tft.fillRoundRect(55, 185, 130, 42, 18, rgb(CLOCK_BG));
+  tft.drawRoundRect(55, 185, 130, 42, 18, rgb(FRAME_COLOR));
+  tft.setTextSize(3);
+  tft.setTextColor(rgb(CLOCK_TEXT));
+  tft.setCursor(75, 194);
   tft.print(currentTime);
 }
 void showMyDisplay() {
-  tft.fillScreen(GC9A01A_BLACK);
-  if (currentAvatar >= 0 && currentAvatar <= 4) drawAvatar(currentAvatar);
+  tft.fillScreen(rgb(SCREEN_BG));
+  if (currentAvatar >= 0 && currentAvatar <= 4) {
+    drawAvatar(currentAvatar);
+    maskAvatarIntoCircle();
+  }
   showClock();
 }
 void handleCommand(const char* line) {
