@@ -57,9 +57,63 @@ function updateDeviceUI() {
   const status = document.querySelector('#realBleStatus');
   const button = document.querySelector('#realBleButton');
   const message = document.querySelector('#realBleMessage');
-  if (status) status.textContent = deviceLink.status;
-  if (message) message.textContent = deviceLink.lastMessage;
-  if (button) button.textContent = deviceLink.device?.gatt?.connected ? '기기 연결 해제' : '블루투스로 기기 연결하기';
+
+  const realConnected =
+    !!deviceLink.device?.gatt?.connected &&
+    !!deviceLink.rx;
+
+  if (status) {
+    status.textContent = deviceLink.status;
+  }
+
+  if (message) {
+    message.textContent = deviceLink.lastMessage;
+  }
+
+  if (button) {
+    button.textContent = realConnected
+      ? '기기 연결 해제'
+      : '블루투스로 기기 연결하기';
+  }
+
+  // 실제 보드가 연결되면 등록 단계도 완료 처리
+  if (state.page === 'connect' && realConnected) {
+    state.connected = true;
+
+    const card = document.querySelector(
+      '.connectCard:not(#realBleCard)'
+    );
+
+    const heading = card?.querySelector('b');
+    const detail = card?.querySelector('.muted');
+
+    if (heading) {
+      heading.textContent = '실제 NU40-DK 연결 완료!';
+    }
+
+    if (detail) {
+      detail.textContent =
+        '보드 연결 완료! 이제 닉네임을 설정해 줘.';
+    }
+
+    const next = document.querySelector('#connect');
+
+    if (next) {
+      next.textContent = '닉네임 정하러 가기 →';
+
+      next.onclick = () => {
+        state.page = 'nickname';
+        render();
+      };
+    }
+
+    const notice = document.querySelector('.notice');
+
+    if (notice) {
+      notice.textContent =
+        '기기 연결이 완료됐어요! 다음 단계로 진행해 주세요.';
+    }
+  }
 }
 
 async function connectNU40() {
