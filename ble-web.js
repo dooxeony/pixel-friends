@@ -164,7 +164,7 @@ async function connectNU40() {
     clearInterval(displaySyncTimer);
     displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
       deviceLink.lastMessage = `화면 전송 실패: ${error.message}`;
-    / updateDeviceUI();
+     updateDeviceUI();
     }), 15000);
   } catch (error) {
     deviceLink.status = '연결 실패 또는 취소됨';
