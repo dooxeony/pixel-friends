@@ -162,10 +162,10 @@ async function connectNU40() {
     await deviceLink.rx.writeValue(new TextEncoder().encode('HELLO\n'));
     await syncBoardDisplay();
     clearInterval(displaySyncTimer);
-    displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
-      deviceLink.lastMessage = `화면 전송 실패: ${error.message}`;
-      updateDeviceUI();
-    }), 15000);
+    //displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
+    //  deviceLink.lastMessage = `화면 전송 실패: ${error.message}`;
+    //  updateDeviceUI();
+    //}), 15000);
   } catch (error) {
     deviceLink.status = '연결 실패 또는 취소됨';
     deviceLink.lastMessage = error?.message || String(error);
