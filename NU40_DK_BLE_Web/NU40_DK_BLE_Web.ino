@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include "characters_new.h"
 #include "like_image.h"
+#include "korean_font.h"
 
 // ========================================
 // 1. 보드 선택
 // 네 보드: 1 / 친구 보드: 2
 // ========================================
-#define MY_BOARD_ID 2
+#define MY_BOARD_ID 1
 
 #if MY_BOARD_ID == 1
 
@@ -71,6 +72,9 @@ volatile uint8_t webConnections = 0;
 // ========================================
 int currentAvatar = -1;
 char currentTime[6] = "--:--";
+char currentNickname[31] = {0};
+char peerNickname[31] = {0};
+volatile bool peerNameChanged = false;
 
 // ========================================
 // 4. 상대방 정보
@@ -296,14 +300,66 @@ void showMyDisplay() {
   drawTime(currentTime);
 }
 
+// UTF-8 닉네임을 가운데 표시합니다. 한글은 내장 12x12 글꼴을 사용합니다.
+void drawNickname(const char* nickname) {
+  if (!nickname || !nickname[0]) return;
+
+  int charCount = 0;
+  for (const uint8_t* p = (const uint8_t*)nickname; *p; ++p) {
+    if ((*p & 0xC0) != 0x80) ++charCount;
+  }
+
+  int x = (240 - charCount * 12) / 2;
+  const int y = 196;
+  const uint16_t ink = rgb(CLOCK_TEXT);
+  const uint16_t paper = rgb(CLOCK_BG);
+  const uint8_t* p = (const uint8_t*)nickname;
+
+  while (*p) {
+    uint32_t codepoint;
+    uint8_t first = *p++;
+    if (first < 0x80) {
+      codepoint = first;
+    } else if ((first & 0xE0) == 0xC0 && p[0]) {
+      codepoint = ((uint32_t)(first & 0x1F) << 6) | (p[0] & 0x3F);
+      ++p;
+    } else if ((first & 0xF0) == 0xE0 && p[0] && p[1]) {
+      codepoint = ((uint32_t)(first & 0x0F) << 12) |
+                  ((uint32_t)(p[0] & 0x3F) << 6) |
+                  (p[1] & 0x3F);
+      p += 2;
+    } else {
+      codepoint = '?';
+    }
+
+    if (codepoint >= 0xAC00 && codepoint <= 0xD7A3) {
+      const uint16_t glyph = (uint16_t)(codepoint - 0xAC00);
+      for (int gy = 0; gy < 12; ++gy) {
+        const uint8_t left = pgm_read_byte(&koreanSyllableFont[glyph * 24 + gy * 2]);
+        const uint8_t right = pgm_read_byte(&koreanSyllableFont[glyph * 24 + gy * 2 + 1]);
+        for (int gx = 0; gx < 12; ++gx) {
+          const bool set = gx < 8
+            ? (left & (0x80 >> gx)) != 0
+            : (right & (0x80 >> (gx - 8))) != 0;
+          if (set) tft.drawPixel(x + gx, y + gy, ink);
+        }
+      }
+    } else if (codepoint >= 32 && codepoint <= 126) {
+      tft.setTextSize(2);
+      tft.setTextColor(ink, paper);
+      tft.setCursor(x, y - 1);
+      tft.write((uint8_t)codepoint);
+    }
+    x += 12;
+  }
+}
+
 // ========================================
 // 16. 상대방 발견 화면
 // ========================================
 void showPeerDisplay() {
 
   uint8_t avatar = peerAvatar;
-  uint8_t hour = peerHour;
-  uint8_t minute = peerMinute;
 
   tft.fillScreen(rgb(SCREEN_BG));
 
@@ -328,20 +384,9 @@ void showPeerDisplay() {
     );
   }
 
-  char timeText[6] = "--:--";
-
-  if (hour <= 23 && minute <= 59) {
-
-    snprintf(
-      timeText,
-      sizeof(timeText),
-      "%02u:%02u",
-      (unsigned)hour,
-      (unsigned)minute
-    );
-  }
-
-  drawTime(timeText);
+  tft.fillRoundRect(40, 188, 160, 34, 12, rgb(CLOCK_BG));
+  tft.drawRoundRect(40, 188, 160, 34, 12, rgb(FRAME_COLOR));
+  drawNickname(peerNickname[0] ? peerNickname : "FRIEND");
 }
 
 // 상대에게서 좋아요를 보내거나 받으면 첨부 이미지 알림을 표시합니다.
@@ -431,6 +476,36 @@ void refreshAdvert() {
     packedSignal
   };
 
+  char boardName[2] = {(char)('0' + MY_BOARD_ID), '\0'};
+  Bluefruit.setName(boardName);
+
+  // Scan response carries the nickname as 16-bit Unicode code points.
+  // This fits ten Korean syllables inside the BLE legacy packet limit.
+  uint8_t nicknameData[25] = {0xFF, 0xFF, 0xF0, MY_BOARD_ID, 0};
+  const uint8_t* nicknameBytes = (const uint8_t*)currentNickname;
+  uint8_t nicknameCount = 0;
+  while (*nicknameBytes && nicknameCount < 10) {
+    uint32_t codepoint;
+    uint8_t first = *nicknameBytes++;
+    if (first < 0x80) {
+      codepoint = first;
+    } else if ((first & 0xE0) == 0xC0 && nicknameBytes[0]) {
+      codepoint = ((uint32_t)(first & 0x1F) << 6) | (nicknameBytes[0] & 0x3F);
+      ++nicknameBytes;
+    } else if ((first & 0xF0) == 0xE0 && nicknameBytes[0] && nicknameBytes[1]) {
+      codepoint = ((uint32_t)(first & 0x0F) << 12) |
+                  ((uint32_t)(nicknameBytes[0] & 0x3F) << 6) |
+                  (nicknameBytes[1] & 0x3F);
+      nicknameBytes += 2;
+    } else {
+      codepoint = '?';
+    }
+    nicknameData[5 + nicknameCount * 2] = (uint8_t)(codepoint >> 8);
+    nicknameData[6 + nicknameCount * 2] = (uint8_t)codepoint;
+    ++nicknameCount;
+  }
+  nicknameData[4] = nicknameCount;
+
   Bluefruit.Advertising.stop();
 
   Bluefruit.Advertising.clearData();
@@ -452,8 +527,13 @@ void refreshAdvert() {
   bool nameOK =
     Bluefruit.ScanResponse.addName();
 
+  bool nicknameOK =
+    Bluefruit.ScanResponse.addManufacturerData(
+      nicknameData, 5 + nicknameCount * 2
+    );
+
   if (!flagsOK || !uartOK ||
-      !dataOK || !nameOK) {
+      !dataOK || !nameOK || !nicknameOK) {
 
     Serial.println(
       "ERROR: BLE advertising data"
@@ -540,7 +620,7 @@ void scan_callback(
   ble_gap_evt_adv_report_t* report
 ) {
 
-  uint8_t data[24] = {0};
+  uint8_t data[32] = {0};
 
   uint8_t len =
     Bluefruit.Scanner.parseReportByType(
@@ -549,6 +629,34 @@ void scan_callback(
       data,
       sizeof(data)
     );
+
+  // The scan response carries the peer nickname as UTF-16 code points.
+  if (len >= 5 && data[0] == 0xFF && data[1] == 0xFF &&
+      data[2] == 0xF0 && data[3] >= 1 && data[3] <= 2 &&
+      data[3] != MY_BOARD_ID && data[4] <= 10 &&
+      len >= 5 + data[4] * 2 && report->rssi >= RSSI_THRESHOLD) {
+    char nextNickname[31] = {0};
+    size_t out = 0;
+    for (uint8_t i = 0; i < data[4] && out < sizeof(nextNickname) - 1; ++i) {
+      const uint16_t codepoint =
+        ((uint16_t)data[5 + i * 2] << 8) | data[6 + i * 2];
+      if (codepoint < 0x80 && out + 1 < sizeof(nextNickname)) {
+        nextNickname[out++] = (char)codepoint;
+      } else if (codepoint < 0x800 && out + 2 < sizeof(nextNickname)) {
+        nextNickname[out++] = (char)(0xC0 | (codepoint >> 6));
+        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
+      } else if (out + 3 < sizeof(nextNickname)) {
+        nextNickname[out++] = (char)(0xE0 | (codepoint >> 12));
+        nextNickname[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
+      }
+    }
+    nextNickname[out] = '\0';
+    if (strcmp(peerNickname, nextNickname) != 0) {
+      strcpy(peerNickname, nextNickname);
+      peerNameChanged = true;
+    }
+  }
 
   // 양쪽 모두 동일한 7바이트 형식
   if (len == 7 &&
@@ -591,16 +699,18 @@ void handleCommand(const char* line) {
     int avatar = -1;
     int hh = -1;
     int mm = -1;
+    char nickname[31] = {0};
 
     int result = sscanf(
       line + 8,
-      "%d:%d:%d",
+      "%d:%d:%d:%30[^\r\n]",
       &avatar,
       &hh,
-      &mm
+      &mm,
+      nickname
     );
 
-    if (result == 3 &&
+    if (result >= 3 &&
         avatar >= 0 &&
         avatar <= 4 &&
         hh >= 0 &&
@@ -622,11 +732,16 @@ void handleCommand(const char* line) {
 
       bool timeChanged =
         strcmp(currentTime, newTime) != 0;
+      bool nicknameChanged = false;
+      if (result == 4 && nickname[0]) {
+        nicknameChanged = strcmp(currentNickname, nickname) != 0;
+        if (nicknameChanged) strcpy(currentNickname, nickname);
+      }
 
       currentAvatar = avatar;
       strcpy(currentTime, newTime);
 
-      if (avatarChanged || timeChanged) {
+      if (avatarChanged || timeChanged || nicknameChanged) {
         refreshAdvert();
       }
 
@@ -710,7 +825,7 @@ void setup() {
   );
 
   // 제조사 데이터가 기본 광고에 존재
-  Bluefruit.Scanner.useActiveScan(false);
+  Bluefruit.Scanner.useActiveScan(true);
 
   if (!Bluefruit.Scanner.start(0)) {
     Serial.println("ERROR: scanner start");
@@ -813,6 +928,11 @@ void loop() {
     Serial.println("LIKE RECEIVED");
   }
   peerLikeWasActive = peerLikeActive;
+
+  if (peerNameChanged) {
+    peerNameChanged = false;
+    if (found && displayedState == 1) displayedState = -1;
+  }
 
   // ------------------------------------
   // 5. 화면 상태 결정

@@ -21,8 +21,12 @@ async function syncBoardDisplay() {
   if (!Number.isInteger(index) || index < 0 || index > 4) return;
   const d = new Date();
   const hhmm = [d.getHours(), d.getMinutes()].map(n => String(n).padStart(2, '0')).join(':');
-  // Single short newline-terminated command avoids BLE UART packet fragmentation.
-  await deviceLink.rx.writeValue(new TextEncoder().encode(`DISPLAY:${index}:${hhmm}\n`));
+  const nick = String(profile.nick || '').replace(/[:\r\n]/g, '').slice(0, 10);
+  const command = new TextEncoder().encode(`DISPLAY:${index}:${hhmm}:${nick}\n`);
+  // Send in small pieces so UTF-8 nicknames fit the default BLE ATT MTU.
+  for (let offset = 0; offset < command.length; offset += 20) {
+    await deviceLink.rx.writeValue(command.slice(offset, offset + 20));
+  }
 }
 
 function isBluetoothSupported() {
@@ -164,7 +168,7 @@ async function connectNU40() {
     clearInterval(displaySyncTimer);
     displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
       deviceLink.lastMessage = `화면 전송 실패: ${error.message}`;
-     updateDeviceUI();
+      updateDeviceUI();
     }), 15000);
   } catch (error) {
     deviceLink.status = '연결 실패 또는 취소됨';
