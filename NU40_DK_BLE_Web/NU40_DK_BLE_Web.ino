@@ -5,12 +5,13 @@
 #include <math.h>
 #include <stdio.h>
 #include "characters_new.h"
+#include "like_image.h"
 
 // ========================================
 // 1. 보드 선택
 // 네 보드: 1 / 친구 보드: 2
 // ========================================
-#define MY_BOARD_ID 1
+#define MY_BOARD_ID 2
 
 #if MY_BOARD_ID == 1
 
@@ -58,12 +59,10 @@ const char* DEVICE_NAME =
   ? "PIXEL_FRIEND_01"
   : "PIXEL_FRIEND_02";
 
-const int RSSI_THRESHOLD = -70;
+const int RSSI_THRESHOLD = -50;
 
 const uint32_t DETECT_TIMEOUT = 4000;
-const uint32_t DISPLAY_TIME = 30000;
 const uint32_t SIGNAL_TIME = 15000;
-const uint32_t SUCCESS_TIME = 3000;
 
 volatile uint8_t webConnections = 0;
 
@@ -88,23 +87,17 @@ volatile uint8_t peerSignal = 0;
 volatile uint8_t peerTarget = 0;
 
 // ========================================
-// 5. 친구 신청 정보
+// 5. BLE 상호작용 신호
 // 0 = 없음
-// 1 = 신청
-// 2 = 수락
-// 3 = 거절
+// 1 = 좋아요
 // ========================================
 uint8_t mySignal = 0;
 uint8_t myTarget = 0;
 
 uint32_t signalUntil = 0;
 
-bool incomingRequest = false;
-bool awaitingAnswer = false;
-bool friendsAdded = false;
-
-// 거절한 요청이 다시 나타나는 것 방지
-bool ignoredRequest = false;
+uint32_t likeUntil = 0;
+bool peerLikeWasActive = false;
 
 // ========================================
 // 6. 화면 상태
@@ -112,15 +105,9 @@ bool ignoredRequest = false;
 bool wasFound = false;
 bool discoveryShown = false;
 
-uint32_t peerDisplayUntil = 0;
-uint32_t successUntil = 0;
+uint32_t friendDetectedAt = 0;
 
-// -1 = 초기 상태
-//  0 = 내 캐릭터
-//  1 = 상대 캐릭터
-//  2 = 신청 대기
-//  3 = 신청 수신
-//  4 = 친구 추가 성공
+// 0 = 내 캐릭터, 1 = 상대 캐릭터, 2 = 좋아요 알림
 int displayedState = -1;
 
 // ========================================
@@ -172,13 +159,8 @@ void ledOff() {
 }
 
 void ledAlert(bool on) {
-  // 친구 보드는 초록 LED 사용
-  // 네 보드는 파랑 LED 사용
-#if LED_B >= 0
-  digitalWrite(LED_B, on ? HIGH : LOW);
-#else
+  // 양쪽 보드 모두 초록 LED로 발견 알림
   digitalWrite(LED_G, on ? HIGH : LOW);
-#endif
 }
 
 // ========================================
@@ -360,6 +342,20 @@ void showPeerDisplay() {
   }
 
   drawTime(timeText);
+}
+
+// 상대에게서 좋아요를 보내거나 받으면 첨부 이미지 알림을 표시합니다.
+void showLikeDisplay() {
+  tft.fillScreen(GC9A01A_WHITE);
+  uint16_t row[160];
+
+  for (int y = 0; y < 160; ++y) {
+    for (int x = 0; x < 160; ++x) {
+      const uint8_t index = pgm_read_byte(&likeImageIndex[y * 160 + x]);
+      row[x] = pgm_read_word(&likeImagePalette[index]);
+    }
+    tft.drawRGBBitmap(40, 40 + y, row, 160, 1);
+  }
 }
 
 // ========================================
@@ -743,9 +739,7 @@ void loop() {
   if (found && !wasFound) {
 
     discoveryShown = true;
-    peerDisplayUntil = now + DISPLAY_TIME;
-
-    ignoredRequest = false;
+    friendDetectedAt = now;
 
     displayedState = -1;
 
@@ -756,6 +750,8 @@ void loop() {
 
     Serial.println("FRIEND LOST!");
     discoveryShown = false;
+    peerLikeWasActive = false;
+    displayedState = -1;
   }
 
   wasFound = found;
@@ -794,148 +790,51 @@ void loop() {
   if (clickCount > 0 &&
       now - lastButtonRelease > 450) {
 
-    uint8_t clicks = clickCount;
+    const uint8_t clicks = clickCount;
     clickCount = 0;
 
-    // 기존 코드의 버튼 규칙 유지:
-    // 1번 = 친구 신청
-    if (clicks == 1 &&
-        found &&
-        !incomingRequest &&
-        !awaitingAnswer &&
-        !friendsAdded) {
-
-      awaitingAnswer = true;
-
+    if (clicks == 1 && found) {
       publishSignal(1, peerId);
-
-      Serial.println("REQUEST SENT");
-    }
-
-    // 2번 = 친구 신청 수락
-    else if (clicks == 2 &&
-             incomingRequest) {
-
-      friendsAdded = true;
-      incomingRequest = false;
-
-      successUntil = now + SUCCESS_TIME;
-
-      publishSignal(2, peerId);
-
-      Serial.println("FRIEND ACCEPTED");
-    }
-
-    // 3번 = 친구 신청 거절
-    else if (clicks >= 3 &&
-             incomingRequest) {
-
-      incomingRequest = false;
-      ignoredRequest = true;
-
-      publishSignal(3, peerId);
-
-      Serial.println("FRIEND REJECTED");
+      likeUntil = now + 3000UL;
+      displayedState = -1;
+      Serial.println("LIKE SENT");
     }
   }
 
-  // ------------------------------------
-  // 4. 상대방 요청 수신
-  // ------------------------------------
-  if (found &&
-      peerTarget == MY_BOARD_ID) {
+  // 상대가 보낸 좋아요 신호는 한 번만 알림으로 표시합니다.
+  const bool peerLikeActive =
+    found &&
+    peerTarget == MY_BOARD_ID &&
+    peerSignal == 1;
 
-    if (peerSignal == 1 &&
-        !friendsAdded &&
-        !awaitingAnswer &&
-        !ignoredRequest) {
-
-      incomingRequest = true;
-    }
-
-    if (peerSignal == 2 &&
-        awaitingAnswer) {
-
-      awaitingAnswer = false;
-      friendsAdded = true;
-
-      successUntil = now + SUCCESS_TIME;
-
-      Serial.println("WE ARE FRIENDS!");
-    }
-
-    if (peerSignal == 3 &&
-        awaitingAnswer) {
-
-      awaitingAnswer = false;
-
-      Serial.println("REQUEST REJECTED");
-    }
+  if (peerLikeActive && !peerLikeWasActive) {
+    likeUntil = now + 3000UL;
+    displayedState = -1;
+    Serial.println("LIKE RECEIVED");
   }
-
-  // 거리가 멀어지면 요청 대기 정리
-  if (!found) {
-    incomingRequest = false;
-
-    if (!friendsAdded) {
-      awaitingAnswer = false;
-    }
-  }
+  peerLikeWasActive = peerLikeActive;
 
   // ------------------------------------
   // 5. 화면 상태 결정
   // ------------------------------------
   int screenState = 0;
-
-  if (friendsAdded &&
-      (int32_t)(now - successUntil) < 0) {
-
-    screenState = 4;
-
-  } else if (incomingRequest) {
-
-    screenState = 3;
-
-  } else if (awaitingAnswer) {
-
+  if ((int32_t)(now - likeUntil) < 0) {
     screenState = 2;
-
-  } else if (found &&
-             discoveryShown &&
-             (int32_t)(now - peerDisplayUntil) < 0) {
-
+  } else if (found && discoveryShown) {
     screenState = 1;
-
-  } else {
-
-    screenState = 0;
   }
 
   // ------------------------------------
   // 6. 화면 변경
   // ------------------------------------
   if (screenState != displayedState) {
-
     displayedState = screenState;
 
-    if (screenState == 4) {
-
-      showFriendScreen("FRIENDS!");
-
-    } else if (screenState == 3) {
-
-      showFriendScreen("2:YES 3:NO");
-
-    } else if (screenState == 2) {
-
-      showFriendScreen("WAITING...");
-
+    if (screenState == 2) {
+      showLikeDisplay();
     } else if (screenState == 1) {
-
       showPeerDisplay();
-
     } else {
-
       showMyDisplay();
     }
   }
@@ -944,25 +843,19 @@ void loop() {
   // 7. 발견 알림 LED
   // 최초 5초 점멸
   // ------------------------------------
-  bool alertActive =
+  const bool alertActive =
     found &&
     discoveryShown &&
-    (int32_t)(
-      now - (peerDisplayUntil - DISPLAY_TIME + 5000)
-    ) < 0;
+    (uint32_t)(now - friendDetectedAt) < 5000UL;
 
   if (alertActive) {
-
-    if (now - lastLedChange >= 300) {
-
+    if (now - lastLedChange >= 300UL) {
       lastLedChange = now;
       ledState = !ledState;
-
       ledAlert(ledState);
     }
-
   } else {
-
+    // LED는 발견 후 5초가 지나거나 상대가 사라지면 즉시 끕니다.
     ledState = false;
     ledOff();
   }
