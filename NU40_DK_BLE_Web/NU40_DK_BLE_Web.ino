@@ -7,6 +7,9 @@
 #include "characters_new.h"
 #include "like_image.h"
 #include "received_like_image.h"
+#include "friend_request_sent_image.h"
+#include "friend_request_received_image.h"
+#include "friends_made_image.h"
 #include "korean_font.h"
 
 // ========================================
@@ -93,20 +96,33 @@ volatile uint8_t peerMinute = 255;
 volatile uint8_t peerSignal = 0;
 volatile uint8_t peerTarget = 0;
 volatile bool peerDisplaying = false;
+volatile bool peerSignalAccepted = false;
 
 // ========================================
 // 5. BLE 상호작용 신호
-// 0 = 없음
-// 1 = 좋아요
+// 0 = 없음, 1 = 좋아요, 2 = 친구 신청, 3 = 수락/거절 응답
 // ========================================
 uint8_t mySignal = 0;
 uint8_t myTarget = 0;
+bool mySignalAccepted = false;
 
 uint32_t signalUntil = 0;
 
 uint32_t likeUntil = 0;
 bool likeWasReceived = false;
 bool peerLikeWasActive = false;
+
+const uint32_t FRIEND_REQUEST_TIMEOUT_MS = 10000UL;
+const uint32_t FRIEND_NOTICE_MS = 20000UL;
+bool incomingFriendRequest = false;
+bool outgoingFriendRequest = false;
+uint32_t incomingDecisionDeadline = 0;
+uint32_t outgoingRequestUntil = 0;
+uint32_t friendNoticeUntil = 0;
+// 0=없음, 1=신청 보냄, 2=신청 받음, 3=친구 수락
+uint8_t friendNoticeType = 0;
+bool peerFriendRequestWasActive = false;
+bool peerFriendResponseWasActive = false;
 
 // ========================================
 // 6. 화면 상태
@@ -118,7 +134,7 @@ uint32_t detectionIgnoreUntil = 0;
 bool displayingPeer = false;
 bool encounterLogged = false;
 
-// 0 = 내 캐릭터, 1 = 상대 캐릭터, 2 = 좋아요 알림
+// 0=내 캐릭터, 1=상대 캐릭터, 2=좋아요, 3=친구 신청, 4=친구 수락
 int displayedState = -1;
 
 // ========================================
@@ -396,31 +412,36 @@ void showPeerDisplay() {
   drawNickname(peerNickname[0] ? peerNickname : "FRIEND");
 }
 
-// 상대에게서 좋아요를 보내거나 받으면 첨부 이미지 알림을 표시합니다.
-void showLikeDisplay() {
+void showPaletteNotification(const uint8_t* pixels, const uint16_t* palette) {
   tft.fillScreen(GC9A01A_WHITE);
   uint16_t row[160];
-
   for (int y = 0; y < 160; ++y) {
     for (int x = 0; x < 160; ++x) {
-      const uint8_t index = pgm_read_byte(&likeImageIndex[y * 160 + x]);
-      row[x] = pgm_read_word(&likeImagePalette[index]);
+      const uint8_t index = pgm_read_byte(pixels + y * 160 + x);
+      row[x] = pgm_read_word(palette + index);
     }
     tft.drawRGBBitmap(40, 40 + y, row, 160, 1);
   }
 }
 
-void showLikeReceivedDisplay() {
-  tft.fillScreen(GC9A01A_WHITE);
-  uint16_t row[160];
+void showLikeDisplay() {
+  showPaletteNotification(likeImageIndex, likeImagePalette);
+}
 
-  for (int y = 0; y < 160; ++y) {
-    for (int x = 0; x < 160; ++x) {
-      const uint8_t index = pgm_read_byte(&receivedLikeImageIndex[y * 160 + x]);
-      row[x] = pgm_read_word(&receivedLikeImagePalette[index]);
-    }
-    tft.drawRGBBitmap(40, 40 + y, row, 160, 1);
-  }
+void showLikeReceivedDisplay() {
+  showPaletteNotification(receivedLikeImageIndex, receivedLikeImagePalette);
+}
+
+void showFriendRequestSentDisplay() {
+  showPaletteNotification(friendRequestSentIndex, friendRequestSentPalette);
+}
+
+void showFriendRequestReceivedDisplay() {
+  showPaletteNotification(friendRequestReceivedIndex, friendRequestReceivedPalette);
+}
+
+void showFriendsMadeDisplay() {
+  showPaletteNotification(friendsMadeIndex, friendsMadePalette);
 }
 
 // ========================================
@@ -484,7 +505,8 @@ void refreshAdvert() {
   uint8_t packedSignal =
     (mySignal & 0x03) |
     ((myTarget & 0x03) << 2) |
-    (displayingPeer ? 0x10 : 0);
+    (displayingPeer ? 0x10 : 0) |
+    (mySignalAccepted ? 0x20 : 0);
 
   uint8_t data[7] = {
     0xFF, 0xFF,
@@ -581,11 +603,13 @@ void refreshAdvert() {
 // ========================================
 void publishSignal(
   uint8_t signal,
-  uint8_t target
+  uint8_t target,
+  bool accepted = false
 ) {
 
   mySignal = signal;
   myTarget = target;
+  mySignalAccepted = accepted;
 
   signalUntil = millis() + SIGNAL_TIME;
 
@@ -699,6 +723,7 @@ void scan_callback(
     peerSignal = data[6] & 0x03;
     peerTarget = (data[6] >> 2) & 0x03;
     peerDisplaying = (data[6] & 0x10) != 0;
+    peerSignalAccepted = (data[6] & 0x20) != 0;
   }
 
   Bluefruit.Scanner.resume();
@@ -916,6 +941,7 @@ void loop() {
 
     mySignal = 0;
     myTarget = 0;
+    mySignalAccepted = false;
 
     refreshAdvert();
   }
@@ -945,7 +971,26 @@ void loop() {
     const uint8_t clicks = clickCount;
     clickCount = 0;
 
-    if (clicks == 1 && nearby) {
+    if (clicks == 2 && nearby) {
+      const bool acceptedInTime = incomingFriendRequest &&
+        (int32_t)(incomingDecisionDeadline - lastButtonRelease) >= 0;
+      if (acceptedInTime) {
+        incomingFriendRequest = false;
+        outgoingFriendRequest = false;
+        publishSignal(3, peerId, true);
+        friendNoticeType = 3;
+        friendNoticeUntil = now + FRIEND_NOTICE_MS;
+        Serial.println("FRIEND REQUEST ACCEPTED");
+      } else if (!outgoingFriendRequest) {
+        publishSignal(2, peerId);
+        outgoingFriendRequest = true;
+        outgoingRequestUntil = now + FRIEND_NOTICE_MS;
+        friendNoticeType = 1;
+        friendNoticeUntil = now + FRIEND_NOTICE_MS;
+        Serial.println("FRIEND REQUEST SENT");
+      }
+      displayedState = -1;
+    } else if (clicks == 1 && nearby) {
       publishSignal(1, peerId);
       likeWasReceived = false;
       likeUntil = now + 3000UL;
@@ -968,6 +1013,54 @@ void loop() {
   }
   peerLikeWasActive = peerLikeActive;
 
+  const bool peerFriendRequestActive =
+    nearby && peerTarget == MY_BOARD_ID && peerSignal == 2;
+  if (peerFriendRequestActive && !peerFriendRequestWasActive) {
+    incomingFriendRequest = true;
+    incomingDecisionDeadline = now + FRIEND_REQUEST_TIMEOUT_MS;
+    friendNoticeType = 2;
+    friendNoticeUntil = now + FRIEND_NOTICE_MS;
+    displayedState = -1;
+    Serial.println("FRIEND REQUEST RECEIVED");
+  }
+  peerFriendRequestWasActive = peerFriendRequestActive;
+
+  const bool peerFriendResponseActive =
+    nearby && peerTarget == MY_BOARD_ID && peerSignal == 3;
+  if (peerFriendResponseActive && !peerFriendResponseWasActive) {
+    if (peerSignalAccepted) {
+      incomingFriendRequest = false;
+      outgoingFriendRequest = false;
+      friendNoticeType = 3;
+      friendNoticeUntil = now + FRIEND_NOTICE_MS;
+      displayedState = -1;
+      Serial.println("FRIENDSHIP CONFIRMED");
+    } else {
+      outgoingFriendRequest = false;
+      Serial.println("FRIEND REQUEST REJECTED");
+    }
+  }
+  peerFriendResponseWasActive = peerFriendResponseActive;
+
+  if (incomingFriendRequest &&
+      (int32_t)(now - incomingDecisionDeadline) >= 0 &&
+      !(clickCount > 0 && now - lastButtonRelease <= 450UL)) {
+    incomingFriendRequest = false;
+    if (nearby) {
+      publishSignal(3, peerId, false);
+      Serial.println("FRIEND REQUEST TIMED OUT: REJECTED");
+    }
+  }
+  if (outgoingFriendRequest &&
+      (int32_t)(now - outgoingRequestUntil) >= 0) {
+    outgoingFriendRequest = false;
+  }
+  if (friendNoticeType != 0 &&
+      (int32_t)(now - friendNoticeUntil) >= 0) {
+    friendNoticeType = 0;
+    displayedState = -1;
+  }
+
   if (peerNameChanged) {
     peerNameChanged = false;
     if (peerDisplayUntil != 0 &&
@@ -981,7 +1074,13 @@ void loop() {
   // 5. 화면 상태 결정
   // ------------------------------------
   int screenState = 0;
-  if ((int32_t)(now - likeUntil) < 0) {
+  if (friendNoticeType == 3 &&
+      (int32_t)(now - friendNoticeUntil) < 0) {
+    screenState = 4;
+  } else if ((friendNoticeType == 1 || friendNoticeType == 2) &&
+             (int32_t)(now - friendNoticeUntil) < 0) {
+    screenState = 3;
+  } else if ((int32_t)(now - likeUntil) < 0) {
     screenState = 2;
   } else if (peerDisplayUntil != 0 &&
              (int32_t)(now - peerDisplayUntil) < 0) {
@@ -997,6 +1096,11 @@ void loop() {
     if (screenState == 2) {
       if (likeWasReceived) showLikeReceivedDisplay();
       else showLikeDisplay();
+    } else if (screenState == 3) {
+      if (friendNoticeType == 1) showFriendRequestSentDisplay();
+      else showFriendRequestReceivedDisplay();
+    } else if (screenState == 4) {
+      showFriendsMadeDisplay();
     } else if (screenState == 1) {
       showPeerDisplay();
     } else {
