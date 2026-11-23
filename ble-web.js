@@ -23,6 +23,22 @@ function saveMeetingLine(line) {
   return true;
 }
 
+
+function saveFriendLine(line) {
+  const match = /^FRIEND:(\d+):(\d+):(.+)$/.exec(line);
+  if (!match) return false;
+  const peerId = Number(match[1]);
+  const avatar = Number(match[2]);
+  const nick = match[3].trim();
+  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4 || !nick) return false;
+  let friends = [];
+  try { friends = JSON.parse(localStorage.getItem('littleMeetFriends') || '[]'); } catch {}
+  if (friends.some(friend => Number(friend.peerId) === peerId)) return false;
+  friends.unshift({ peerId, avatar, nick, addedAt: new Date().toISOString() });
+  try { localStorage.setItem('littleMeetFriends', JSON.stringify(friends.slice(0, 100))); } catch {}
+  return true;
+}
+
 // The preset selected during registration is saved in littleMeetProfile.
 // A browser supplies local time; the board has no real-time clock.
 async function syncBoardDisplay() {
@@ -175,6 +191,7 @@ async function connectNU40() {
       const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       uartReceiveBuffer += meetingDecoder.decode(bytes, { stream: true });
       let meetingAdded = false;
+      let friendAdded = false;
       let newline;
       while ((newline = uartReceiveBuffer.indexOf('\n')) >= 0) {
         const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '').trim();
@@ -182,10 +199,12 @@ async function connectNU40() {
         if (line) {
           deviceLink.lastMessage = line;
           meetingAdded = saveMeetingLine(line) || meetingAdded;
+          friendAdded = saveFriendLine(line) || friendAdded;
         }
       }
       updateDeviceUI();
-      if (meetingAdded && state.page === 'home' && ['home', 'meet'].includes(state.tab)) render();
+      if ((meetingAdded && state.page === 'home' && ['home', 'meet'].includes(state.tab)) ||
+          (friendAdded && state.page === 'home' && ['home', 'friends'].includes(state.tab))) render();
     });
     deviceLink.status = `연결됨: ${device.name || 'NU40-DK'}`;
     deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';
