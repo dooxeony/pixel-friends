@@ -114,11 +114,18 @@ bool peerLikeWasActive = false;
 
 const uint32_t FRIEND_REQUEST_TIMEOUT_MS = 10000UL;
 const uint32_t FRIEND_NOTICE_MS = 20000UL;
+const uint32_t FRIEND_ACCEPTED_NOTICE_MS = 3000UL;
+const uint32_t FRIEND_SCREEN_MS = 20000UL;
 bool incomingFriendRequest = false;
 bool outgoingFriendRequest = false;
 uint32_t incomingDecisionDeadline = 0;
 uint32_t outgoingRequestUntil = 0;
 uint32_t friendNoticeUntil = 0;
+uint32_t acceptedFriendScreenUntil = 0;
+bool friendHandshakeLogged = false;
+char pendingFriendEvents[4][64] = {{0}};
+uint8_t pendingFriendHead = 0;
+uint8_t pendingFriendCount = 0;
 // 0=없음, 1=신청 보냄, 2=신청 받음, 3=친구 수락
 uint8_t friendNoticeType = 0;
 bool peerFriendRequestWasActive = false;
@@ -412,6 +419,31 @@ void showPeerDisplay() {
   drawNickname(peerNickname[0] ? peerNickname : "FRIEND");
 }
 
+void sendOrQueueFriendEvent() {
+  if (friendHandshakeLogged || peerId < 1 || peerId > 2 || peerAvatar > 4) return;
+  friendHandshakeLogged = true;
+  char event[64];
+  snprintf(event, sizeof(event), "FRIEND:%u:%u:%s", peerId, peerAvatar,
+           peerNickname[0] ? peerNickname : "친구");
+  if (webConnections > 0) {
+    bleuart.println(event);
+  } else if (pendingFriendCount < 4) {
+    const uint8_t slot = (pendingFriendHead + pendingFriendCount) % 4;
+    strncpy(pendingFriendEvents[slot], event, sizeof(pendingFriendEvents[slot]) - 1);
+    pendingFriendEvents[slot][sizeof(pendingFriendEvents[slot]) - 1] = '\0';
+    pendingFriendCount++;
+  }
+}
+
+void flushPendingFriendEvents() {
+  while (pendingFriendCount > 0) {
+    bleuart.println(pendingFriendEvents[pendingFriendHead]);
+    pendingFriendEvents[pendingFriendHead][0] = '\0';
+    pendingFriendHead = (pendingFriendHead + 1) % 4;
+    pendingFriendCount--;
+  }
+}
+
 void showPaletteNotification(const uint8_t* pixels, const uint16_t* palette) {
   tft.fillScreen(GC9A01A_WHITE);
   uint16_t row[160];
@@ -442,6 +474,17 @@ void showFriendRequestReceivedDisplay() {
 
 void showFriendsMadeDisplay() {
   showPaletteNotification(friendsMadeIndex, friendsMadePalette);
+}
+
+void beginFriendshipAccepted(uint32_t now) {
+  incomingFriendRequest = false;
+  outgoingFriendRequest = false;
+  friendNoticeType = 3;
+  friendNoticeUntil = now + FRIEND_ACCEPTED_NOTICE_MS;
+  acceptedFriendScreenUntil = friendNoticeUntil + FRIEND_SCREEN_MS;
+  peerDisplayUntil = 0;
+  displayedState = -1;
+  sendOrQueueFriendEvent();
 }
 
 // ========================================
@@ -737,6 +780,7 @@ void handleCommand(const char* line) {
   if (strcmp(line, "HELLO") == 0) {
 
     bleuart.println("NU40-DK READY");
+    flushPendingFriendEvents();
     Serial.println("Web Bluetooth ready");
 
   } else if (
@@ -975,16 +1019,15 @@ void loop() {
       const bool acceptedInTime = incomingFriendRequest &&
         (int32_t)(incomingDecisionDeadline - lastButtonRelease) >= 0;
       if (acceptedInTime) {
-        incomingFriendRequest = false;
-        outgoingFriendRequest = false;
         publishSignal(3, peerId, true);
-        friendNoticeType = 3;
-        friendNoticeUntil = now + FRIEND_NOTICE_MS;
+        beginFriendshipAccepted(now);
         Serial.println("FRIEND REQUEST ACCEPTED");
       } else if (!outgoingFriendRequest) {
         publishSignal(2, peerId);
         outgoingFriendRequest = true;
         outgoingRequestUntil = now + FRIEND_NOTICE_MS;
+        friendHandshakeLogged = false;
+        acceptedFriendScreenUntil = 0;
         friendNoticeType = 1;
         friendNoticeUntil = now + FRIEND_NOTICE_MS;
         Serial.println("FRIEND REQUEST SENT");
@@ -1018,6 +1061,8 @@ void loop() {
   if (peerFriendRequestActive && !peerFriendRequestWasActive) {
     incomingFriendRequest = true;
     incomingDecisionDeadline = now + FRIEND_REQUEST_TIMEOUT_MS;
+    friendHandshakeLogged = false;
+    acceptedFriendScreenUntil = 0;
     friendNoticeType = 2;
     friendNoticeUntil = now + FRIEND_NOTICE_MS;
     displayedState = -1;
@@ -1029,14 +1074,15 @@ void loop() {
     nearby && peerTarget == MY_BOARD_ID && peerSignal == 3;
   if (peerFriendResponseActive && !peerFriendResponseWasActive) {
     if (peerSignalAccepted) {
-      incomingFriendRequest = false;
-      outgoingFriendRequest = false;
-      friendNoticeType = 3;
-      friendNoticeUntil = now + FRIEND_NOTICE_MS;
-      displayedState = -1;
+      beginFriendshipAccepted(now);
       Serial.println("FRIENDSHIP CONFIRMED");
     } else {
       outgoingFriendRequest = false;
+      friendNoticeType = 0;
+      friendNoticeUntil = 0;
+      acceptedFriendScreenUntil = 0;
+      peerDisplayUntil = 0;
+      displayedState = -1;
       Serial.println("FRIEND REQUEST REJECTED");
     }
   }
@@ -1046,6 +1092,11 @@ void loop() {
       (int32_t)(now - incomingDecisionDeadline) >= 0 &&
       !(clickCount > 0 && now - lastButtonRelease <= 450UL)) {
     incomingFriendRequest = false;
+    friendNoticeType = 0;
+    friendNoticeUntil = 0;
+    acceptedFriendScreenUntil = 0;
+    peerDisplayUntil = 0;
+    displayedState = -1;
     if (nearby) {
       publishSignal(3, peerId, false);
       Serial.println("FRIEND REQUEST TIMED OUT: REJECTED");
@@ -1080,6 +1131,10 @@ void loop() {
   } else if ((friendNoticeType == 1 || friendNoticeType == 2) &&
              (int32_t)(now - friendNoticeUntil) < 0) {
     screenState = 3;
+  } else if (acceptedFriendScreenUntil != 0 &&
+             (int32_t)(now - friendNoticeUntil) >= 0 &&
+             (int32_t)(now - acceptedFriendScreenUntil) < 0) {
+    screenState = 5;
   } else if ((int32_t)(now - likeUntil) < 0) {
     screenState = 2;
   } else if (peerDisplayUntil != 0 &&
@@ -1101,7 +1156,7 @@ void loop() {
       else showFriendRequestReceivedDisplay();
     } else if (screenState == 4) {
       showFriendsMadeDisplay();
-    } else if (screenState == 1) {
+    } else if (screenState == 5 || screenState == 1) {
       showPeerDisplay();
     } else {
       showMyDisplay();
