@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include "characters_new.h"
 #include "like_image.h"
+#include "received_like_image.h"
 #include "korean_font.h"
 
 // ========================================
@@ -104,6 +105,7 @@ uint8_t myTarget = 0;
 uint32_t signalUntil = 0;
 
 uint32_t likeUntil = 0;
+bool likeWasReceived = false;
 bool peerLikeWasActive = false;
 
 // ========================================
@@ -403,6 +405,19 @@ void showLikeDisplay() {
     for (int x = 0; x < 160; ++x) {
       const uint8_t index = pgm_read_byte(&likeImageIndex[y * 160 + x]);
       row[x] = pgm_read_word(&likeImagePalette[index]);
+    }
+    tft.drawRGBBitmap(40, 40 + y, row, 160, 1);
+  }
+}
+
+void showLikeReceivedDisplay() {
+  tft.fillScreen(GC9A01A_WHITE);
+  uint16_t row[160];
+
+  for (int y = 0; y < 160; ++y) {
+    for (int x = 0; x < 160; ++x) {
+      const uint8_t index = pgm_read_byte(&receivedLikeImageIndex[y * 160 + x]);
+      row[x] = pgm_read_word(&receivedLikeImagePalette[index]);
     }
     tft.drawRGBBitmap(40, 40 + y, row, 160, 1);
   }
@@ -932,6 +947,7 @@ void loop() {
 
     if (clicks == 1 && nearby) {
       publishSignal(1, peerId);
+      likeWasReceived = false;
       likeUntil = now + 3000UL;
       displayedState = -1;
       Serial.println("LIKE SENT");
@@ -945,6 +961,7 @@ void loop() {
     peerSignal == 1;
 
   if (peerLikeActive && !peerLikeWasActive) {
+    likeWasReceived = true;
     likeUntil = now + 3000UL;
     displayedState = -1;
     Serial.println("LIKE RECEIVED");
@@ -978,7 +995,8 @@ void loop() {
     displayedState = screenState;
 
     if (screenState == 2) {
-      showLikeDisplay();
+      if (likeWasReceived) showLikeReceivedDisplay();
+      else showLikeDisplay();
     } else if (screenState == 1) {
       showPeerDisplay();
     } else {
