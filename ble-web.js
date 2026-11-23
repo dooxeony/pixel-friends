@@ -185,7 +185,7 @@ async function connectNU40() {
         }
       }
       updateDeviceUI();
-      if (meetingAdded && state.page === 'home' && state.tab === 'meet') render();
+      if (meetingAdded && state.page === 'home' && ['home', 'meet'].includes(state.tab)) render();
     });
     deviceLink.status = `연결됨: ${device.name || 'NU40-DK'}`;
     deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';

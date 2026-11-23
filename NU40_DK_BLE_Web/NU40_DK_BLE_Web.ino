@@ -40,8 +40,8 @@
 
   // 친구 보드의 LED_B 24는
   // BUTTON_PIN 24와 충돌하므로 사용 안 함
-  #define LED_B -1
-  #define BUTTON_PIN 24
+  #define LED_B 24
+  #define BUTTON_PIN 25
 
 #endif
 
