@@ -6,6 +6,22 @@ const BLE_UART_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 
 const deviceLink = { device: null, tx: null, rx: null, status: '연결되지 않음', lastMessage: '' };
 let displaySyncTimer = null;
+let uartReceiveBuffer = '';
+const meetingDecoder = new TextDecoder();
+
+function saveMeetingLine(line) {
+  const match = /^MEET:(\d+):(\d+):(.+)$/.exec(line);
+  if (!match) return false;
+  const peerId = Number(match[1]);
+  const avatar = Number(match[2]);
+  const nick = match[3].trim();
+  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4 || !nick) return false;
+  let meetings = [];
+  try { meetings = JSON.parse(localStorage.getItem('littleMeetMeetings') || '[]'); } catch {}
+  meetings.unshift({ peerId, avatar, nick, metAt: new Date().toISOString() });
+  try { localStorage.setItem('littleMeetMeetings', JSON.stringify(meetings.slice(0, 100))); } catch {}
+  return true;
+}
 
 // The preset selected during registration is saved in littleMeetProfile.
 // A browser supplies local time; the board has no real-time clock.
@@ -157,11 +173,22 @@ async function connectNU40() {
     deviceLink.tx.addEventListener('characteristicvaluechanged', event => {
       const value = event.target.value;
       const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      deviceLink.lastMessage = new TextDecoder().decode(bytes).trim();
+      uartReceiveBuffer += meetingDecoder.decode(bytes, { stream: true });
+      let meetingAdded = false;
+      let newline;
+      while ((newline = uartReceiveBuffer.indexOf('\n')) >= 0) {
+        const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '').trim();
+        uartReceiveBuffer = uartReceiveBuffer.slice(newline + 1);
+        if (line) {
+          deviceLink.lastMessage = line;
+          meetingAdded = saveMeetingLine(line) || meetingAdded;
+        }
+      }
       updateDeviceUI();
+      if (meetingAdded && state.page === 'home' && state.tab === 'meet') render();
     });
     deviceLink.status = `연결됨: ${device.name || 'NU40-DK'}`;
-    deviceLink.lastMessage = '실제 보드가 연결됐어요. 친구 기록 저장은 다음 단계에서 추가합니다.';
+    deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';
     updateDeviceUI();
     await deviceLink.rx.writeValue(new TextEncoder().encode('HELLO\n'));
     await syncBoardDisplay();

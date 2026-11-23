@@ -12,7 +12,7 @@
 // 1. 보드 선택
 // 네 보드: 1 / 친구 보드: 2
 // ========================================
-#define MY_BOARD_ID 1
+#define MY_BOARD_ID 2
 
 #if MY_BOARD_ID == 1
 
@@ -63,6 +63,8 @@ const char* DEVICE_NAME =
 const int RSSI_THRESHOLD = -50;
 
 const uint32_t DETECT_TIMEOUT = 4000;
+const uint32_t PEER_SCREEN_HOLD_MS = 30000;
+const uint32_t DETECTION_COOLDOWN_MS = 10000;
 const uint32_t SIGNAL_TIME = 15000;
 
 volatile uint8_t webConnections = 0;
@@ -89,6 +91,7 @@ volatile uint8_t peerMinute = 255;
 
 volatile uint8_t peerSignal = 0;
 volatile uint8_t peerTarget = 0;
+volatile bool peerDisplaying = false;
 
 // ========================================
 // 5. BLE 상호작용 신호
@@ -106,10 +109,12 @@ bool peerLikeWasActive = false;
 // ========================================
 // 6. 화면 상태
 // ========================================
-bool wasFound = false;
-bool discoveryShown = false;
-
+bool wasDetectionEligible = false;
 uint32_t friendDetectedAt = 0;
+uint32_t peerDisplayUntil = 0;
+uint32_t detectionIgnoreUntil = 0;
+bool displayingPeer = false;
+bool encounterLogged = false;
 
 // 0 = 내 캐릭터, 1 = 상대 캐릭터, 2 = 좋아요 알림
 int displayedState = -1;
@@ -463,7 +468,8 @@ void refreshAdvert() {
 
   uint8_t packedSignal =
     (mySignal & 0x03) |
-    ((myTarget & 0x03) << 2);
+    ((myTarget & 0x03) << 2) |
+    (displayingPeer ? 0x10 : 0);
 
   uint8_t data[7] = {
     0xFF, 0xFF,
@@ -677,6 +683,7 @@ void scan_callback(
 
     peerSignal = data[6] & 0x03;
     peerTarget = (data[6] >> 2) & 0x03;
+    peerDisplaying = (data[6] & 0x10) != 0;
   }
 
   Bluefruit.Scanner.resume();
@@ -847,29 +854,44 @@ void loop() {
   // ------------------------------------
   // 1. 친구 감지
   // ------------------------------------
-  bool found =
+  const bool nearby =
     seenFriend &&
     (now - lastFriendSeen < DETECT_TIMEOUT);
+  const bool cooldownActive =
+    detectionIgnoreUntil != 0 &&
+    (int32_t)(now - detectionIgnoreUntil) < 0;
+  const bool detectionEligible = nearby && !cooldownActive;
 
-  if (found && !wasFound) {
-
-    discoveryShown = true;
+  if (detectionEligible && !wasDetectionEligible) {
+    encounterLogged = false;
     friendDetectedAt = now;
-
+    peerDisplayUntil = now + PEER_SCREEN_HOLD_MS;
+    displayingPeer = true;
+    refreshAdvert();
+    detectionIgnoreUntil = peerDisplayUntil + DETECTION_COOLDOWN_MS;
     displayedState = -1;
-
     Serial.println("FRIEND DETECTED!");
   }
+  wasDetectionEligible = detectionEligible;
 
-  if (!found && wasFound) {
-
-    Serial.println("FRIEND LOST!");
-    discoveryShown = false;
-    peerLikeWasActive = false;
-    displayedState = -1;
+  if (!nearby && !displayingPeer && !cooldownActive) {
+    encounterLogged = false;
+  }
+  if (nearby && displayingPeer && peerDisplaying && !encounterLogged &&
+      peerAvatar <= 4 && peerId >= 1 && peerId <= 2) {
+    char meeting[64];
+    snprintf(meeting, sizeof(meeting), "MEET:%u:%u:%s", peerId,
+             peerAvatar, peerNickname[0] ? peerNickname : "친구");
+    bleuart.println(meeting);
+    encounterLogged = true;
+    Serial.println("MUTUAL SCREEN SHARE: MEETING RECORDED");
   }
 
-  wasFound = found;
+  if (displayingPeer && peerDisplayUntil != 0 &&
+      (int32_t)(now - peerDisplayUntil) >= 0) {
+    displayingPeer = false;
+    refreshAdvert();
+  }
 
   // ------------------------------------
   // 2. 신호 만료
@@ -908,7 +930,7 @@ void loop() {
     const uint8_t clicks = clickCount;
     clickCount = 0;
 
-    if (clicks == 1 && found) {
+    if (clicks == 1 && nearby) {
       publishSignal(1, peerId);
       likeUntil = now + 3000UL;
       displayedState = -1;
@@ -918,7 +940,7 @@ void loop() {
 
   // 상대가 보낸 좋아요 신호는 한 번만 알림으로 표시합니다.
   const bool peerLikeActive =
-    found &&
+    nearby &&
     peerTarget == MY_BOARD_ID &&
     peerSignal == 1;
 
@@ -931,7 +953,11 @@ void loop() {
 
   if (peerNameChanged) {
     peerNameChanged = false;
-    if (found && displayedState == 1) displayedState = -1;
+    if (peerDisplayUntil != 0 &&
+        (int32_t)(now - peerDisplayUntil) < 0 &&
+        displayedState == 1) {
+      displayedState = -1;
+    }
   }
 
   // ------------------------------------
@@ -940,7 +966,8 @@ void loop() {
   int screenState = 0;
   if ((int32_t)(now - likeUntil) < 0) {
     screenState = 2;
-  } else if (found && discoveryShown) {
+  } else if (peerDisplayUntil != 0 &&
+             (int32_t)(now - peerDisplayUntil) < 0) {
     screenState = 1;
   }
 
@@ -964,8 +991,7 @@ void loop() {
   // 최초 5초 점멸
   // ------------------------------------
   const bool alertActive =
-    found &&
-    discoveryShown &&
+    nearby &&
     (uint32_t)(now - friendDetectedAt) < 5000UL;
 
   if (alertActive) {
