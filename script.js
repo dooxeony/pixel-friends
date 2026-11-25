@@ -93,6 +93,21 @@ render=function(){
         else{state.selected=state.profile.avatar.index;state.custom=null}
         state.page='character';render();
       };card.append(b)}
+      const content=document.querySelector('.content');
+      if(content&&!document.querySelector('#restartAppButton')){
+        const restart=document.createElement('button');
+        restart.id='restartAppButton';
+        restart.className='secondary resetButton';
+        restart.textContent='처음부터 다시 시작하기';
+        restart.onclick=async()=>{
+          if(!confirm('프로필, 친구 목록, 만남 기록을 모두 지우고 처음부터 다시 시작할까요?'))return;
+          try{if(typeof resetBoardProfileForRestart==='function')await resetBoardProfileForRestart()}catch(error){console.warn('보드 초기화는 다음 연결 때 다시 시도합니다.',error)}
+          ['littleMeetProfile','littleMeetFriends','littleMeetMeetings'].forEach(key=>{try{localStorage.removeItem(key)}catch{}});
+          state.page='welcome';state.step=0;state.nick='';state.selected=0;state.connected=false;state.custom=null;state.photo=null;state.zoom=1.4;state.offsetX=0;state.offsetY=0;state.tab='home';state.editing=false;delete state.profile;
+          render();
+        };
+        content.append(restart);
+      }
     }
   }
 };

@@ -777,7 +777,34 @@ void scan_callback(
 // ========================================
 void handleCommand(const char* line) {
 
-  if (strcmp(line, "HELLO") == 0) {
+  if (strcmp(line, "RESET") == 0) {
+
+    currentAvatar = -1;
+    strcpy(currentTime, "--:--");
+    currentNickname[0] = '\0';
+    mySignal = 0;
+    myTarget = 0;
+    mySignalAccepted = false;
+    signalUntil = 0;
+    likeUntil = 0;
+    incomingFriendRequest = false;
+    outgoingFriendRequest = false;
+    friendNoticeType = 0;
+    friendNoticeUntil = 0;
+    acceptedFriendScreenUntil = 0;
+    peerDisplayUntil = 0;
+    displayingPeer = false;
+    encounterLogged = false;
+    pendingFriendHead = 0;
+    pendingFriendCount = 0;
+    for (uint8_t i = 0; i < 4; ++i) pendingFriendEvents[i][0] = '\0';
+    refreshAdvert();
+    showMyDisplay();
+    displayedState = 0;
+    bleuart.println("RESET OK");
+    Serial.println("PROFILE RESET");
+
+  } else if (strcmp(line, "HELLO") == 0) {
 
     bleuart.println("NU40-DK READY");
     flushPendingFriendEvents();
