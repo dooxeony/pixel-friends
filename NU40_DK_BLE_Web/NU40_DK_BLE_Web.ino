@@ -1138,17 +1138,14 @@ void loop() {
     peerProfileChanged = false;
     forcePeerProfileSend = false;
     const char* peerNick = peerNickname[0] ? peerNickname : "친구";
-    const bool changed = peerAvatar != lastSentPeerAvatar ||
-      strcmp(peerNick, lastSentPeerNickname) != 0 ||
-      strcmp(peerIntro, lastSentPeerIntro) != 0;
-    if (changed || lastSentPeerAvatar == 255) {
-      sendPeerProfileInSmallPackets(peerId, peerAvatar, peerNick, peerIntro);
-      lastSentPeerAvatar = peerAvatar;
-      strncpy(lastSentPeerNickname, peerNick, sizeof(lastSentPeerNickname) - 1);
-      lastSentPeerNickname[sizeof(lastSentPeerNickname) - 1] = '\0';
-      strncpy(lastSentPeerIntro, peerIntro, sizeof(lastSentPeerIntro) - 1);
-      lastSentPeerIntro[sizeof(lastSentPeerIntro) - 1] = '\0';
-    }
+    // Repeat each complete profile so a web page that just connected or just
+    // added this friend can recover even if it missed an earlier BLE packet.
+    sendPeerProfileInSmallPackets(peerId, peerAvatar, peerNick, peerIntro);
+    lastSentPeerAvatar = peerAvatar;
+    strncpy(lastSentPeerNickname, peerNick, sizeof(lastSentPeerNickname) - 1);
+    lastSentPeerNickname[sizeof(lastSentPeerNickname) - 1] = '\0';
+    strncpy(lastSentPeerIntro, peerIntro, sizeof(lastSentPeerIntro) - 1);
+    lastSentPeerIntro[sizeof(lastSentPeerIntro) - 1] = '\0';
   }
 
   // ------------------------------------
