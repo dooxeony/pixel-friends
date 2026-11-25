@@ -84,9 +84,7 @@ char currentIntro[121] = {0};
 char peerIntro[121] = {0};
 volatile bool peerNameChanged = false;
 volatile bool peerProfileChanged = false;
-uint8_t peerNameTotal = 0;
 uint8_t peerIntroTotal = 0;
-uint8_t peerNamePartMask = 0;
 uint8_t peerIntroPartMask = 0;
 uint8_t peerAboutId = 0;
 uint32_t lastProfileAdvert = 0;
@@ -579,24 +577,46 @@ void refreshAdvert() {
   char boardName[2] = {(char)('0' + MY_BOARD_ID), '\0'};
   Bluefruit.setName(boardName);
 
-  // The scan response rotates UTF-8 fragments for the nickname and intro.
-  // Leave room for the one-character device name in the legacy scan response.
-  static uint8_t messageType = 1;
-  static uint8_t messagePart = 0;
-  const char* message = messageType == 1 ? currentNickname : currentIntro;
-  const size_t messageLength = strlen(message);
-  const uint8_t partCount = messageLength ? (messageLength + 17) / 18 : 1;
-  const size_t offset = (size_t)messagePart * 18;
-  const uint8_t chunkLength = offset < messageLength
-      ? (uint8_t)min((size_t)18, messageLength - offset) : 0;
-  uint8_t profileData[26] = {0xFF, 0xFF, 0xF1, MY_BOARD_ID,
-                             messageType, messagePart, partCount, chunkLength};
-  if (chunkLength) memcpy(profileData + 8, message + offset, chunkLength);
-  messagePart++;
-  if (messagePart >= partCount) {
-    messagePart = 0;
-    messageType = messageType == 1 ? 2 : 1;
+  // Keep the original nickname packet intact; rotate only the additional intro packets.
+  static bool sendIntroPacket = false;
+  static uint8_t introPart = 0;
+  uint8_t nicknameData[25] = {0xFF, 0xFF, 0xF0, MY_BOARD_ID, 0};
+  uint8_t nicknameCount = 0;
+  const uint8_t* nicknameBytes = (const uint8_t*)currentNickname;
+  while (*nicknameBytes && nicknameCount < 10) {
+    uint32_t codepoint;
+    uint8_t first = *nicknameBytes++;
+    if (first < 0x80) codepoint = first;
+    else if ((first & 0xE0) == 0xC0 && nicknameBytes[0]) {
+      codepoint = ((uint32_t)(first & 0x1F) << 6) | (nicknameBytes[0] & 0x3F);
+      ++nicknameBytes;
+    } else if ((first & 0xF0) == 0xE0 && nicknameBytes[0] && nicknameBytes[1]) {
+      codepoint = ((uint32_t)(first & 0x0F) << 12) |
+                  ((uint32_t)(nicknameBytes[0] & 0x3F) << 6) |
+                  (nicknameBytes[1] & 0x3F);
+      nicknameBytes += 2;
+    } else codepoint = '?';
+    nicknameData[5 + nicknameCount * 2] = (uint8_t)(codepoint >> 8);
+    nicknameData[6 + nicknameCount * 2] = (uint8_t)codepoint;
+    ++nicknameCount;
   }
+  nicknameData[4] = nicknameCount;
+
+  const size_t introLength = strlen(currentIntro);
+  const uint8_t introTotal = introLength ? (introLength + 17) / 18 : 1;
+  if (introPart >= introTotal) introPart = 0;
+  const size_t introOffset = (size_t)introPart * 18;
+  const uint8_t introChunkLength = introOffset < introLength
+      ? (uint8_t)min((size_t)18, introLength - introOffset) : 0;
+  uint8_t introData[25] = {0xFF, 0xFF, 0xF2, MY_BOARD_ID,
+                           introPart, introTotal, introChunkLength};
+  if (introChunkLength) memcpy(introData + 7, currentIntro + introOffset, introChunkLength);
+  const bool useIntroPacket = sendIntroPacket;
+  if (useIntroPacket) {
+    introPart++;
+    if (introPart >= introTotal) introPart = 0;
+  }
+  sendIntroPacket = !sendIntroPacket;
 
   Bluefruit.Advertising.stop();
 
@@ -616,11 +636,10 @@ void refreshAdvert() {
       data, sizeof(data)
     );
 
-  bool profileOK =
-    Bluefruit.ScanResponse.addManufacturerData(
-      profileData, 8 + chunkLength
-    );
   bool nameOK = Bluefruit.ScanResponse.addName();
+  bool profileOK = useIntroPacket
+    ? Bluefruit.ScanResponse.addManufacturerData(introData, 7 + introChunkLength)
+    : Bluefruit.ScanResponse.addManufacturerData(nicknameData, 5 + nicknameCount * 2);
 
   if (!flagsOK || !uartOK ||
       !dataOK || !profileOK || !nameOK) {
@@ -722,33 +741,55 @@ void scan_callback(
       sizeof(data)
     );
 
-  // Scan responses carry reassembled nickname and intro strings.
-  if (len >= 8 && data[0] == 0xFF && data[1] == 0xFF &&
-      data[2] == 0xF1 && data[3] >= 1 && data[3] <= 2 &&
-      data[3] != MY_BOARD_ID && data[4] >= 1 && data[4] <= 2 &&
-      data[6] >= 1 && data[6] <= 7 && data[5] < data[6] &&
-      data[7] <= 18 && len >= 8 + data[7] && report->rssi >= RSSI_THRESHOLD) {
-    const uint8_t id = data[3], kind = data[4], part = data[5], total = data[6];
+  // Preserve the original UTF-16 nickname format; receive intro chunks separately.
+  if (len >= 5 && data[0] == 0xFF && data[1] == 0xFF &&
+      data[2] == 0xF0 && data[3] >= 1 && data[3] <= 2 &&
+      data[3] != MY_BOARD_ID && data[4] <= 10 &&
+      len >= 5 + data[4] * 2 && report->rssi >= RSSI_THRESHOLD) {
+    char nextNickname[31] = {0};
+    size_t out = 0;
+    for (uint8_t i = 0; i < data[4] && out < sizeof(nextNickname) - 1; ++i) {
+      const uint16_t codepoint = ((uint16_t)data[5 + i * 2] << 8) | data[6 + i * 2];
+      if (codepoint < 0x80 && out + 1 < sizeof(nextNickname)) nextNickname[out++] = (char)codepoint;
+      else if (codepoint < 0x800 && out + 2 < sizeof(nextNickname)) {
+        nextNickname[out++] = (char)(0xC0 | (codepoint >> 6));
+        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
+      } else if (out + 3 < sizeof(nextNickname)) {
+        nextNickname[out++] = (char)(0xE0 | (codepoint >> 12));
+        nextNickname[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
+      }
+    }
+    nextNickname[out] = '\0';
+    if (strcmp(peerNickname, nextNickname) != 0) {
+      strcpy(peerNickname, nextNickname);
+      peerNameChanged = true;
+    }
+  }
+
+  if (len >= 7 && data[0] == 0xFF && data[1] == 0xFF &&
+      data[2] == 0xF2 && data[3] >= 1 && data[3] <= 2 &&
+      data[3] != MY_BOARD_ID && data[5] >= 1 && data[5] <= 7 &&
+      data[4] < data[5] && data[6] <= 18 && len >= 7 + data[6] &&
+      report->rssi >= RSSI_THRESHOLD) {
+    const uint8_t id = data[3], part = data[4], total = data[5];
     if (peerAboutId != id) {
       peerAboutId = id;
-      peerNamePartMask = peerIntroPartMask = 0;
-      peerNameTotal = peerIntroTotal = 0;
-      peerNickname[0] = peerIntro[0] = '\0';
+      peerIntroPartMask = 0;
+      peerIntroTotal = 0;
+      peerIntro[0] = '\0';
     }
-    char* target = kind == 1 ? peerNickname : peerIntro;
-    uint8_t* mask = kind == 1 ? &peerNamePartMask : &peerIntroPartMask;
-    uint8_t* expected = kind == 1 ? &peerNameTotal : &peerIntroTotal;
-    const size_t capacity = kind == 1 ? sizeof(peerNickname) : sizeof(peerIntro);
     const size_t offset = (size_t)part * 18;
-    if (offset + data[7] < capacity && (kind != 1 || total <= 2)) {
-      if (*expected != total || part == 0) { *expected = total; *mask = 0; target[0] = '\0'; }
-      memcpy(target + offset, data + 8, data[7]);
-      target[offset + data[7]] = '\0';
-      *mask |= (uint8_t)(1U << part);
-      if (*mask == (uint8_t)((1U << total) - 1U)) {
-        if (kind == 1) peerNameChanged = true;
-        else peerProfileChanged = true;
+    if (offset + data[6] < sizeof(peerIntro)) {
+      if (peerIntroTotal != total || part == 0) {
+        peerIntroTotal = total;
+        peerIntroPartMask = 0;
+        peerIntro[0] = '\0';
       }
+      memcpy(peerIntro + offset, data + 7, data[6]);
+      peerIntro[offset + data[6]] = '\0';
+      peerIntroPartMask |= (uint8_t)(1U << part);
+      if (peerIntroPartMask == (uint8_t)((1U << total) - 1U)) peerProfileChanged = true;
     }
   }
 
@@ -789,8 +830,8 @@ void handleCommand(const char* line) {
     currentIntro[0] = '\0';
     peerIntro[0] = peerNickname[0] = '\0';
     peerAboutId = 0;
-    peerNamePartMask = peerIntroPartMask = 0;
-    peerNameTotal = peerIntroTotal = 0;
+    peerIntroPartMask = 0;
+    peerIntroTotal = 0;
     peerProfileChanged = false;
     lastSentPeerNickname[0] = lastSentPeerIntro[0] = '\0';
     lastSentPeerAvatar = 255;
