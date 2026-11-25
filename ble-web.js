@@ -41,6 +41,18 @@ function saveFriendLine(line) {
 
 // The preset selected during registration is saved in littleMeetProfile.
 // A browser supplies local time; the board has no real-time clock.
+async function resetBoardProfileForRestart() {
+  const pendingKey = 'littleMeetPendingBoardReset';
+  try { localStorage.setItem(pendingKey, '1'); } catch {}
+
+  if (!deviceLink.device?.gatt?.connected || !deviceLink.rx) return;
+
+  await deviceLink.rx.writeValue(new TextEncoder().encode('RESET\n'));
+  await new Promise(resolve => setTimeout(resolve, 180));
+  try { localStorage.removeItem(pendingKey); } catch {}
+  deviceLink.device.gatt.disconnect();
+}
+
 async function syncBoardDisplay() {
   if (!deviceLink.device?.gatt?.connected || !deviceLink.rx) return;
   const profile = JSON.parse(localStorage.getItem('littleMeetProfile') || 'null');
@@ -210,6 +222,11 @@ async function connectNU40() {
     deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';
     updateDeviceUI();
     await deviceLink.rx.writeValue(new TextEncoder().encode('HELLO\n'));
+    if (localStorage.getItem('littleMeetPendingBoardReset') === '1') {
+      await deviceLink.rx.writeValue(new TextEncoder().encode('RESET\n'));
+      await new Promise(resolve => setTimeout(resolve, 180));
+      localStorage.removeItem('littleMeetPendingBoardReset');
+    }
     await syncBoardDisplay();
     clearInterval(displaySyncTimer);
     displaySyncTimer = setInterval(() => syncBoardDisplay().catch(error => {
