@@ -8,6 +8,7 @@ const deviceLink = { device: null, tx: null, rx: null, status: '연결되지 않
 let displaySyncTimer = null;
 let uartReceiveBuffer = '';
 const meetingDecoder = new TextDecoder();
+const peerProfileParts = new Map();
 
 function saveMeetingLine(line) {
   const match = /^MEET:(\d+):(\d+):(.+)$/.exec(line);
@@ -25,19 +26,54 @@ function saveMeetingLine(line) {
 
 
 function saveFriendLine(line) {
-  const match = /^FRIEND:(\d+):(\d+):([^:]+)(?::(.*))?$/.exec(line);
+  const match = /^FRIEND:(\d+):(\d+)(?::([^:]+)(?::(.*))?)?$/.exec(line);
   if (!match) return false;
   const peerId = Number(match[1]);
   const avatar = Number(match[2]);
-  const nick = match[3].trim();
+  const nick = (match[3] || '친구').trim();
   const intro = Array.from(match[4] || '').slice(0, 30).join('');
-  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4 || !nick) return false;
+  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4) return false;
   let friends = [];
   try { friends = JSON.parse(localStorage.getItem('littleMeetFriends') || '[]'); } catch {}
   const existing = friends.find(friend => Number(friend.peerId) === peerId);
-  if (existing) { existing.nick = nick; existing.avatar = avatar; existing.intro = intro; }
+  if (existing) { if(match[3])existing.nick = nick; existing.avatar = avatar; if(match[4]!==undefined)existing.intro = intro; }
   else friends.unshift({ peerId, avatar, nick, intro, addedAt: new Date().toISOString() });
   try { localStorage.setItem('littleMeetFriends', JSON.stringify(friends.slice(0, 100))); } catch {}
+  return true;
+}
+
+function saveChunkedFriendProfileLine(line) {
+  const match = /^P:(\d+):(\d+):(\d+):(\d+):(.*)$/.exec(line);
+  if (!match) return false;
+  const peerId = Number(match[1]), avatar = Number(match[2]);
+  const part = Number(match[3]), total = Number(match[4]), chunk = match[5];
+  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4 ||
+      !Number.isInteger(total) || total < 1 || total > 40 || part < 0 || part >= total) return false;
+
+  let assembly = peerProfileParts.get(peerId);
+  if (!assembly || part === 0 || assembly.total !== total) {
+    assembly = { avatar, total, chunks: Array(total).fill(null) };
+    peerProfileParts.set(peerId, assembly);
+  }
+  assembly.avatar = avatar;
+  assembly.chunks[part] = chunk;
+  if (assembly.chunks.some(item => item === null)) return false;
+
+  const profile = assembly.chunks.join('');
+  const separator = profile.indexOf('|');
+  if (separator < 0) return false;
+  const nick = Array.from(profile.slice(0, separator)).slice(0, 10).join('');
+  const intro = Array.from(profile.slice(separator + 1)).slice(0, 30).join('');
+  let friends = [];
+  try { friends = JSON.parse(localStorage.getItem('littleMeetFriends') || '[]'); } catch {}
+  const friend = friends.find(item => Number(item.peerId) === peerId);
+  if (!friend) return false;
+  const changed = friend.nick !== nick || friend.avatar !== avatar || friend.intro !== intro;
+  if (!changed) return false;
+  friend.nick = nick;
+  friend.avatar = avatar;
+  friend.intro = intro;
+  try { localStorage.setItem('littleMeetFriends', JSON.stringify(friends)); } catch {}
   return true;
 }
 
@@ -232,6 +268,7 @@ async function connectNU40() {
       let meetingAdded = false;
       let friendAdded = false;
       let friendProfileUpdated = false;
+      let chunkedProfileUpdated = false;
       let newline;
       while ((newline = uartReceiveBuffer.indexOf('\n')) >= 0) {
         const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '').trim();
@@ -241,11 +278,12 @@ async function connectNU40() {
           meetingAdded = saveMeetingLine(line) || meetingAdded;
           friendAdded = saveFriendLine(line) || friendAdded;
           friendProfileUpdated = saveFriendProfileLine(line) || friendProfileUpdated;
+          chunkedProfileUpdated = saveChunkedFriendProfileLine(line) || chunkedProfileUpdated;
         }
       }
       updateDeviceUI();
       if ((meetingAdded && state.page === 'home' && ['home', 'meet'].includes(state.tab)) ||
-          ((friendAdded || friendProfileUpdated) && state.page === 'home' && ['home', 'friends'].includes(state.tab))) render();
+          ((friendAdded || friendProfileUpdated || chunkedProfileUpdated) && state.page === 'home' && ['home', 'friends'].includes(state.tab))) render();
     });
     deviceLink.status = `연결됨: ${device.name || 'NU40-DK'}`;
     deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';
