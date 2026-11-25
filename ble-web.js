@@ -271,9 +271,9 @@ async function connectNU40() {
       let chunkedProfileUpdated = false;
       let newline;
       while ((newline = uartReceiveBuffer.indexOf('\n')) >= 0) {
-        const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '').trim();
+        const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '');
         uartReceiveBuffer = uartReceiveBuffer.slice(newline + 1);
-        if (line) {
+        if (line.trim()) {
           deviceLink.lastMessage = line;
           meetingAdded = saveMeetingLine(line) || meetingAdded;
           friendAdded = saveFriendLine(line) || friendAdded;
