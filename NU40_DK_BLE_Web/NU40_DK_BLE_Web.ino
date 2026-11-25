@@ -84,6 +84,7 @@ char currentIntro[121] = {0};
 char peerIntro[121] = {0};
 volatile bool peerNameChanged = false;
 volatile bool peerProfileChanged = false;
+volatile bool forcePeerProfileSend = false;
 uint8_t peerIntroTotal = 0;
 uint8_t peerIntroPartMask = 0;
 uint8_t peerAboutId = 0;
@@ -431,12 +432,9 @@ void showPeerDisplay() {
 
 void sendOrQueueFriendEvent() {
   if (friendHandshakeLogged || peerId < 1 || peerId > 2 || peerAvatar > 4) return;
-  if (peerAboutId != peerId || !peerIntroTotal ||
-      peerIntroPartMask != (uint8_t)((1U << peerIntroTotal) - 1U)) return;
   friendHandshakeLogged = true;
-  char event[192];
-  snprintf(event, sizeof(event), "FRIEND:%u:%u:%s:%s", peerId, peerAvatar,
-           peerNickname[0] ? peerNickname : "친구", peerIntro);
+  char event[24];
+  snprintf(event, sizeof(event), "FRIEND:%u:%u", peerId, peerAvatar);
   if (webConnections > 0) {
     bleuart.println(event);
   } else if (pendingFriendCount < 4) {
@@ -453,6 +451,61 @@ void flushPendingFriendEvents() {
     pendingFriendEvents[pendingFriendHead][0] = '\0';
     pendingFriendHead = (pendingFriendHead + 1) % 4;
     pendingFriendCount--;
+  }
+}
+
+void sendPeerProfileInSmallPackets(uint8_t id, uint8_t avatar,
+                                   const char* nickname, const char* intro) {
+  char combined[152] = {0};
+  snprintf(combined, sizeof(combined), "%s|%s",
+           nickname && nickname[0] ? nickname : "친구",
+           intro ? intro : "");
+  const size_t length = strlen(combined);
+  uint8_t total = 0;
+  size_t position = 0;
+  while (position < length) {
+    uint8_t chunkBytes = 0;
+    while (position < length) {
+      const uint8_t first = (uint8_t)combined[position];
+      uint8_t charBytes = first < 0x80 ? 1 :
+        ((first & 0xE0) == 0xC0 ? 2 :
+         ((first & 0xF0) == 0xE0 ? 3 :
+          ((first & 0xF8) == 0xF0 ? 4 : 1)));
+      if (position + charBytes > length) charBytes = 1;
+      if (chunkBytes && chunkBytes + charBytes > 5) break;
+      chunkBytes += charBytes;
+      position += charBytes;
+    }
+    total++;
+  }
+
+  position = 0;
+  uint8_t part = 0;
+  while (position < length && part < total) {
+    const size_t start = position;
+    uint8_t chunkBytes = 0;
+    while (position < length) {
+      const uint8_t first = (uint8_t)combined[position];
+      uint8_t charBytes = first < 0x80 ? 1 :
+        ((first & 0xE0) == 0xC0 ? 2 :
+         ((first & 0xF0) == 0xE0 ? 3 :
+          ((first & 0xF8) == 0xF0 ? 4 : 1)));
+      if (position + charBytes > length) charBytes = 1;
+      if (chunkBytes && chunkBytes + charBytes > 5) break;
+      chunkBytes += charBytes;
+      position += charBytes;
+    }
+    char packet[20] = {0};
+    const int headerLength = snprintf(packet, sizeof(packet), "P:%u:%u:%u:%u:",
+                                      id, avatar, part, total);
+    if (headerLength > 0 && (size_t)headerLength + chunkBytes < sizeof(packet)) {
+      memcpy(packet + headerLength, combined + start, chunkBytes);
+      packet[headerLength + chunkBytes] = '\0';
+      // Keep the complete notification (including println's CRLF) within 20 bytes.
+      bleuart.println(packet);
+      delay(8);
+    }
+    part++;
   }
 }
 
@@ -496,6 +549,8 @@ void beginFriendshipAccepted(uint32_t now) {
   acceptedFriendScreenUntil = friendNoticeUntil + FRIEND_SCREEN_MS;
   peerDisplayUntil = 0;
   displayedState = -1;
+  forcePeerProfileSend = true;
+  lastSentPeerAvatar = 255;
   sendOrQueueFriendEvent();
 }
 
@@ -833,6 +888,7 @@ void handleCommand(const char* line) {
     peerIntroPartMask = 0;
     peerIntroTotal = 0;
     peerProfileChanged = false;
+    forcePeerProfileSend = false;
     lastSentPeerNickname[0] = lastSentPeerIntro[0] = '\0';
     lastSentPeerAvatar = 255;
     strcpy(currentTime, "--:--");
@@ -1077,18 +1133,16 @@ void loop() {
     sendOrQueueFriendEvent();
   }
 
-  if (peerProfileChanged && webConnections > 0 && peerId == peerAboutId &&
+  if ((peerProfileChanged || forcePeerProfileSend) && webConnections > 0 && peerId == peerAboutId &&
       peerId >= 1 && peerId <= 2 && peerAvatar <= 4) {
     peerProfileChanged = false;
+    forcePeerProfileSend = false;
     const char* peerNick = peerNickname[0] ? peerNickname : "친구";
     const bool changed = peerAvatar != lastSentPeerAvatar ||
       strcmp(peerNick, lastSentPeerNickname) != 0 ||
       strcmp(peerIntro, lastSentPeerIntro) != 0;
-    if (changed) {
-    char profileEvent[192];
-    snprintf(profileEvent, sizeof(profileEvent), "PROFILE:%u:%u:%s:%s",
-             peerId, peerAvatar, peerNick, peerIntro);
-    bleuart.println(profileEvent);
+    if (changed || lastSentPeerAvatar == 255) {
+      sendPeerProfileInSmallPackets(peerId, peerAvatar, peerNick, peerIntro);
       lastSentPeerAvatar = peerAvatar;
       strncpy(lastSentPeerNickname, peerNick, sizeof(lastSentPeerNickname) - 1);
       lastSentPeerNickname[sizeof(lastSentPeerNickname) - 1] = '\0';
