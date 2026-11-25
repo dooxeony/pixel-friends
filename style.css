@@ -7,3 +7,12 @@ body{margin:0;background:radial-gradient(circle at 8% 12%,#ffe6ec 0,transparent 
 .meetingAvatar{width:58px;height:58px;border-radius:15px;background:#fff0f4;image-rendering:pixelated;flex:none}
 
 .resetButton{margin-top:18px;border-color:#f0d4da;color:#a85f70;background:#fff8fa}
+
+/* Profile intro and friend detail cards */
+textarea.input{display:block;resize:vertical;min-height:76px;line-height:1.5;font:inherit}
+.profileIntroEditor{margin:18px 0 24px;padding:18px;background:#fffaf8;border:2px solid #f3e7e5;border-radius:22px}
+.profileIntroEditor .field{margin:0 0 9px}
+.profileIntroEditor .secondary{margin-top:6px}
+.friendCard{position:relative;text-align:left;color:inherit;font:inherit;cursor:pointer}
+.friendArrow{margin-left:auto;color:#d698aa;font-size:26px;font-weight:900}
+.friendIntro{margin:12px 0 25px;padding:18px 20px;min-height:62px;border-radius:18px;background:#fff5f6;color:#6e5a62;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}

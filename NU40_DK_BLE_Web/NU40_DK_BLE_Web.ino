@@ -80,7 +80,19 @@ int currentAvatar = -1;
 char currentTime[6] = "--:--";
 char currentNickname[31] = {0};
 char peerNickname[31] = {0};
+char currentIntro[121] = {0};
+char peerIntro[121] = {0};
 volatile bool peerNameChanged = false;
+volatile bool peerProfileChanged = false;
+uint8_t peerNameTotal = 0;
+uint8_t peerIntroTotal = 0;
+uint8_t peerNamePartMask = 0;
+uint8_t peerIntroPartMask = 0;
+uint8_t peerAboutId = 0;
+uint32_t lastProfileAdvert = 0;
+char lastSentPeerNickname[31] = {0};
+char lastSentPeerIntro[121] = {0};
+uint8_t lastSentPeerAvatar = 255;
 
 // ========================================
 // 4. 상대방 정보
@@ -123,7 +135,7 @@ uint32_t outgoingRequestUntil = 0;
 uint32_t friendNoticeUntil = 0;
 uint32_t acceptedFriendScreenUntil = 0;
 bool friendHandshakeLogged = false;
-char pendingFriendEvents[4][64] = {{0}};
+char pendingFriendEvents[4][192] = {{0}};
 uint8_t pendingFriendHead = 0;
 uint8_t pendingFriendCount = 0;
 // 0=없음, 1=신청 보냄, 2=신청 받음, 3=친구 수락
@@ -161,7 +173,7 @@ uint32_t lastLedChange = 0;
 // ========================================
 // 9. 웹 UART 명령
 // ========================================
-char command[48] = {0};
+char command[160] = {0};
 size_t commandLength = 0;
 
 // ========================================
@@ -421,10 +433,12 @@ void showPeerDisplay() {
 
 void sendOrQueueFriendEvent() {
   if (friendHandshakeLogged || peerId < 1 || peerId > 2 || peerAvatar > 4) return;
+  if (peerAboutId != peerId || !peerIntroTotal ||
+      peerIntroPartMask != (uint8_t)((1U << peerIntroTotal) - 1U)) return;
   friendHandshakeLogged = true;
-  char event[64];
-  snprintf(event, sizeof(event), "FRIEND:%u:%u:%s", peerId, peerAvatar,
-           peerNickname[0] ? peerNickname : "친구");
+  char event[192];
+  snprintf(event, sizeof(event), "FRIEND:%u:%u:%s:%s", peerId, peerAvatar,
+           peerNickname[0] ? peerNickname : "친구", peerIntro);
   if (webConnections > 0) {
     bleuart.println(event);
   } else if (pendingFriendCount < 4) {
@@ -565,32 +579,24 @@ void refreshAdvert() {
   char boardName[2] = {(char)('0' + MY_BOARD_ID), '\0'};
   Bluefruit.setName(boardName);
 
-  // Scan response carries the nickname as 16-bit Unicode code points.
-  // This fits ten Korean syllables inside the BLE legacy packet limit.
-  uint8_t nicknameData[25] = {0xFF, 0xFF, 0xF0, MY_BOARD_ID, 0};
-  const uint8_t* nicknameBytes = (const uint8_t*)currentNickname;
-  uint8_t nicknameCount = 0;
-  while (*nicknameBytes && nicknameCount < 10) {
-    uint32_t codepoint;
-    uint8_t first = *nicknameBytes++;
-    if (first < 0x80) {
-      codepoint = first;
-    } else if ((first & 0xE0) == 0xC0 && nicknameBytes[0]) {
-      codepoint = ((uint32_t)(first & 0x1F) << 6) | (nicknameBytes[0] & 0x3F);
-      ++nicknameBytes;
-    } else if ((first & 0xF0) == 0xE0 && nicknameBytes[0] && nicknameBytes[1]) {
-      codepoint = ((uint32_t)(first & 0x0F) << 12) |
-                  ((uint32_t)(nicknameBytes[0] & 0x3F) << 6) |
-                  (nicknameBytes[1] & 0x3F);
-      nicknameBytes += 2;
-    } else {
-      codepoint = '?';
-    }
-    nicknameData[5 + nicknameCount * 2] = (uint8_t)(codepoint >> 8);
-    nicknameData[6 + nicknameCount * 2] = (uint8_t)codepoint;
-    ++nicknameCount;
+  // The scan response rotates UTF-8 fragments for the nickname and intro.
+  // Leave room for the one-character device name in the legacy scan response.
+  static uint8_t messageType = 1;
+  static uint8_t messagePart = 0;
+  const char* message = messageType == 1 ? currentNickname : currentIntro;
+  const size_t messageLength = strlen(message);
+  const uint8_t partCount = messageLength ? (messageLength + 17) / 18 : 1;
+  const size_t offset = (size_t)messagePart * 18;
+  const uint8_t chunkLength = offset < messageLength
+      ? (uint8_t)min((size_t)18, messageLength - offset) : 0;
+  uint8_t profileData[26] = {0xFF, 0xFF, 0xF1, MY_BOARD_ID,
+                             messageType, messagePart, partCount, chunkLength};
+  if (chunkLength) memcpy(profileData + 8, message + offset, chunkLength);
+  messagePart++;
+  if (messagePart >= partCount) {
+    messagePart = 0;
+    messageType = messageType == 1 ? 2 : 1;
   }
-  nicknameData[4] = nicknameCount;
 
   Bluefruit.Advertising.stop();
 
@@ -610,16 +616,14 @@ void refreshAdvert() {
       data, sizeof(data)
     );
 
-  bool nameOK =
-    Bluefruit.ScanResponse.addName();
-
-  bool nicknameOK =
+  bool profileOK =
     Bluefruit.ScanResponse.addManufacturerData(
-      nicknameData, 5 + nicknameCount * 2
+      profileData, 8 + chunkLength
     );
+  bool nameOK = Bluefruit.ScanResponse.addName();
 
   if (!flagsOK || !uartOK ||
-      !dataOK || !nameOK || !nicknameOK) {
+      !dataOK || !profileOK || !nameOK) {
 
     Serial.println(
       "ERROR: BLE advertising data"
@@ -718,31 +722,33 @@ void scan_callback(
       sizeof(data)
     );
 
-  // The scan response carries the peer nickname as UTF-16 code points.
-  if (len >= 5 && data[0] == 0xFF && data[1] == 0xFF &&
-      data[2] == 0xF0 && data[3] >= 1 && data[3] <= 2 &&
-      data[3] != MY_BOARD_ID && data[4] <= 10 &&
-      len >= 5 + data[4] * 2 && report->rssi >= RSSI_THRESHOLD) {
-    char nextNickname[31] = {0};
-    size_t out = 0;
-    for (uint8_t i = 0; i < data[4] && out < sizeof(nextNickname) - 1; ++i) {
-      const uint16_t codepoint =
-        ((uint16_t)data[5 + i * 2] << 8) | data[6 + i * 2];
-      if (codepoint < 0x80 && out + 1 < sizeof(nextNickname)) {
-        nextNickname[out++] = (char)codepoint;
-      } else if (codepoint < 0x800 && out + 2 < sizeof(nextNickname)) {
-        nextNickname[out++] = (char)(0xC0 | (codepoint >> 6));
-        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
-      } else if (out + 3 < sizeof(nextNickname)) {
-        nextNickname[out++] = (char)(0xE0 | (codepoint >> 12));
-        nextNickname[out++] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
-        nextNickname[out++] = (char)(0x80 | (codepoint & 0x3F));
-      }
+  // Scan responses carry reassembled nickname and intro strings.
+  if (len >= 8 && data[0] == 0xFF && data[1] == 0xFF &&
+      data[2] == 0xF1 && data[3] >= 1 && data[3] <= 2 &&
+      data[3] != MY_BOARD_ID && data[4] >= 1 && data[4] <= 2 &&
+      data[6] >= 1 && data[6] <= 7 && data[5] < data[6] &&
+      data[7] <= 18 && len >= 8 + data[7] && report->rssi >= RSSI_THRESHOLD) {
+    const uint8_t id = data[3], kind = data[4], part = data[5], total = data[6];
+    if (peerAboutId != id) {
+      peerAboutId = id;
+      peerNamePartMask = peerIntroPartMask = 0;
+      peerNameTotal = peerIntroTotal = 0;
+      peerNickname[0] = peerIntro[0] = '\0';
     }
-    nextNickname[out] = '\0';
-    if (strcmp(peerNickname, nextNickname) != 0) {
-      strcpy(peerNickname, nextNickname);
-      peerNameChanged = true;
+    char* target = kind == 1 ? peerNickname : peerIntro;
+    uint8_t* mask = kind == 1 ? &peerNamePartMask : &peerIntroPartMask;
+    uint8_t* expected = kind == 1 ? &peerNameTotal : &peerIntroTotal;
+    const size_t capacity = kind == 1 ? sizeof(peerNickname) : sizeof(peerIntro);
+    const size_t offset = (size_t)part * 18;
+    if (offset + data[7] < capacity && (kind != 1 || total <= 2)) {
+      if (*expected != total || part == 0) { *expected = total; *mask = 0; target[0] = '\0'; }
+      memcpy(target + offset, data + 8, data[7]);
+      target[offset + data[7]] = '\0';
+      *mask |= (uint8_t)(1U << part);
+      if (*mask == (uint8_t)((1U << total) - 1U)) {
+        if (kind == 1) peerNameChanged = true;
+        else peerProfileChanged = true;
+      }
     }
   }
 
@@ -780,6 +786,14 @@ void handleCommand(const char* line) {
   if (strcmp(line, "RESET") == 0) {
 
     currentAvatar = -1;
+    currentIntro[0] = '\0';
+    peerIntro[0] = peerNickname[0] = '\0';
+    peerAboutId = 0;
+    peerNamePartMask = peerIntroPartMask = 0;
+    peerNameTotal = peerIntroTotal = 0;
+    peerProfileChanged = false;
+    lastSentPeerNickname[0] = lastSentPeerIntro[0] = '\0';
+    lastSentPeerAvatar = 255;
     strcpy(currentTime, "--:--");
     currentNickname[0] = '\0';
     mySignal = 0;
@@ -809,6 +823,12 @@ void handleCommand(const char* line) {
     bleuart.println("NU40-DK READY");
     flushPendingFriendEvents();
     Serial.println("Web Bluetooth ready");
+
+  } else if (strncmp(line, "ABOUT:", 6) == 0) {
+    strncpy(currentIntro, line + 6, sizeof(currentIntro) - 1);
+    currentIntro[sizeof(currentIntro) - 1] = '\0';
+    refreshAdvert();
+    bleuart.println("ABOUT OK");
 
   } else if (
     strncmp(line, "DISPLAY:", 8) == 0
@@ -962,6 +982,12 @@ void loop() {
 
   uint32_t now = millis();
 
+  // Cycle the BLE scan-response fragments so peers can reconstruct the full profile.
+  if (now - lastProfileAdvert >= 500UL) {
+    lastProfileAdvert = now;
+    refreshAdvert();
+  }
+
   // ------------------------------------
   // 1. 친구 감지
   // ------------------------------------
@@ -1002,6 +1028,32 @@ void loop() {
       (int32_t)(now - peerDisplayUntil) >= 0) {
     displayingPeer = false;
     refreshAdvert();
+  }
+
+  if (acceptedFriendScreenUntil != 0 &&
+      (int32_t)(now - acceptedFriendScreenUntil) < 0 &&
+      !friendHandshakeLogged) {
+    sendOrQueueFriendEvent();
+  }
+
+  if (peerProfileChanged && webConnections > 0 && peerId == peerAboutId &&
+      peerId >= 1 && peerId <= 2 && peerAvatar <= 4) {
+    peerProfileChanged = false;
+    const char* peerNick = peerNickname[0] ? peerNickname : "친구";
+    const bool changed = peerAvatar != lastSentPeerAvatar ||
+      strcmp(peerNick, lastSentPeerNickname) != 0 ||
+      strcmp(peerIntro, lastSentPeerIntro) != 0;
+    if (changed) {
+    char profileEvent[192];
+    snprintf(profileEvent, sizeof(profileEvent), "PROFILE:%u:%u:%s:%s",
+             peerId, peerAvatar, peerNick, peerIntro);
+    bleuart.println(profileEvent);
+      lastSentPeerAvatar = peerAvatar;
+      strncpy(lastSentPeerNickname, peerNick, sizeof(lastSentPeerNickname) - 1);
+      lastSentPeerNickname[sizeof(lastSentPeerNickname) - 1] = '\0';
+      strncpy(lastSentPeerIntro, peerIntro, sizeof(lastSentPeerIntro) - 1);
+      lastSentPeerIntro[sizeof(lastSentPeerIntro) - 1] = '\0';
+    }
   }
 
   // ------------------------------------

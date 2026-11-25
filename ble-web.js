@@ -25,17 +25,38 @@ function saveMeetingLine(line) {
 
 
 function saveFriendLine(line) {
-  const match = /^FRIEND:(\d+):(\d+):(.+)$/.exec(line);
+  const match = /^FRIEND:(\d+):(\d+):([^:]+)(?::(.*))?$/.exec(line);
   if (!match) return false;
   const peerId = Number(match[1]);
   const avatar = Number(match[2]);
   const nick = match[3].trim();
+  const intro = Array.from(match[4] || '').slice(0, 30).join('');
   if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4 || !nick) return false;
   let friends = [];
   try { friends = JSON.parse(localStorage.getItem('littleMeetFriends') || '[]'); } catch {}
-  if (friends.some(friend => Number(friend.peerId) === peerId)) return false;
-  friends.unshift({ peerId, avatar, nick, addedAt: new Date().toISOString() });
+  const existing = friends.find(friend => Number(friend.peerId) === peerId);
+  if (existing) { existing.nick = nick; existing.avatar = avatar; existing.intro = intro; }
+  else friends.unshift({ peerId, avatar, nick, intro, addedAt: new Date().toISOString() });
   try { localStorage.setItem('littleMeetFriends', JSON.stringify(friends.slice(0, 100))); } catch {}
+  return true;
+}
+
+function saveFriendProfileLine(line) {
+  const match = /^PROFILE:(\d+):(\d+):([^:]+)(?::(.*))?$/.exec(line);
+  if (!match) return false;
+  const peerId = Number(match[1]);
+  const avatar = Number(match[2]);
+  const nick = match[3].trim();
+  const intro = Array.from(match[4] || '').slice(0, 30).join('');
+  if (![1, 2].includes(peerId) || !Number.isInteger(avatar) || avatar < 0 || avatar > 4) return false;
+  let friends = [];
+  try { friends = JSON.parse(localStorage.getItem('littleMeetFriends') || '[]'); } catch {}
+  const friend = friends.find(item => Number(item.peerId) === peerId);
+  if (!friend) return false;
+  friend.avatar = avatar;
+  if (nick) friend.nick = nick;
+  friend.intro = intro;
+  try { localStorage.setItem('littleMeetFriends', JSON.stringify(friends)); } catch {}
   return true;
 }
 
@@ -56,7 +77,13 @@ async function resetBoardProfileForRestart() {
 async function syncBoardDisplay() {
   if (!deviceLink.device?.gatt?.connected || !deviceLink.rx) return;
   const profile = JSON.parse(localStorage.getItem('littleMeetProfile') || 'null');
-  if (!profile || profile.avatar?.type !== 'preset') {
+  if (!profile) return;
+  const intro = Array.from(String(profile.intro || '').replace(/[\r\n]/g, ' ')).slice(0, 30).join('');
+  const aboutCommand = new TextEncoder().encode(`ABOUT:${intro}\n`);
+  for (let offset = 0; offset < aboutCommand.length; offset += 20) {
+    await deviceLink.rx.writeValue(aboutCommand.slice(offset, offset + 20));
+  }
+  if (profile.avatar?.type !== 'preset') {
     deviceLink.lastMessage = '기본 캐릭터 5종만 보드에 표시할 수 있어요.';
     updateDeviceUI();
     return;
@@ -204,6 +231,7 @@ async function connectNU40() {
       uartReceiveBuffer += meetingDecoder.decode(bytes, { stream: true });
       let meetingAdded = false;
       let friendAdded = false;
+      let friendProfileUpdated = false;
       let newline;
       while ((newline = uartReceiveBuffer.indexOf('\n')) >= 0) {
         const line = uartReceiveBuffer.slice(0, newline).replace(/\r$/, '').trim();
@@ -212,11 +240,12 @@ async function connectNU40() {
           deviceLink.lastMessage = line;
           meetingAdded = saveMeetingLine(line) || meetingAdded;
           friendAdded = saveFriendLine(line) || friendAdded;
+          friendProfileUpdated = saveFriendProfileLine(line) || friendProfileUpdated;
         }
       }
       updateDeviceUI();
       if ((meetingAdded && state.page === 'home' && ['home', 'meet'].includes(state.tab)) ||
-          (friendAdded && state.page === 'home' && ['home', 'friends'].includes(state.tab))) render();
+          ((friendAdded || friendProfileUpdated) && state.page === 'home' && ['home', 'friends'].includes(state.tab))) render();
     });
     deviceLink.status = `연결됨: ${device.name || 'NU40-DK'}`;
     deviceLink.lastMessage = '보드가 연결됐어요. 서로 화면을 공유하면 만남이 기록돼요.';
